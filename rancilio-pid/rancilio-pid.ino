@@ -205,11 +205,11 @@ int maxErrorCounter = 10 ;  //depends on intervaltempmes* , define max seconds f
    PID
 ******************************************************/
 unsigned long previousMillistemp;  // initialisation at the end of init()
-const unsigned long intervaltempmestsic = 400 ;
+const unsigned long intervaltempmestsic = 800 ;
 int pidMode = 1; //1 = Automatic, 0 = Manual
 
 const unsigned int windowSize = 1000;
-unsigned int isrCounter = 0;  // counter for ISR
+volatile unsigned int isrCounter = 0;  // counter for ISR
 unsigned long windowStartTime;
 double Input, Output;
 double previousInput = 0;
@@ -272,21 +272,22 @@ void printScreen();
 void brew();
 void readAnalogInput();
 // Tasks
-Task tCheckTemp(intervaltempmestsic, TASK_FOREVER, &refreshTemp, &lpr);  //adding task to the chain on creation
-Task tCheckPressure(2000, TASK_FOREVER, &t2Callback, &lpr);
-Task tCheckWeight(3000, TASK_FOREVER, &t3Callback, &lpr);
-Task tSendBlynk(intervalBlynk, TASK_FOREVER, &sendToBlynk, &lpr);
-Task tPrintScreen(intervalDisplay, TASK_FOREVER, &printScreen, &lpr);
+//Task tCheckTemp(intervaltempmestsic, TASK_FOREVER, &refreshTemp, &lpr, true); //adding task to the chain on creation
+Task tCheckTemp(TASK_IMMEDIATE, TASK_FOREVER, &refreshTemp, &lpr, true); //adding task to the chain on creation
+Task tCheckPressure(2000, TASK_FOREVER, &t2Callback, &lpr, true); //adding task to the chain on creation
+Task tCheckWeight(3000, TASK_FOREVER, &t3Callback, &lpr, true); //adding task to the chain on creation
+Task tSendBlynk(intervalBlynk, TASK_FOREVER, &sendToBlynk, &lpr, true); //adding task to the chain on creation
+Task tPrintScreen(intervalDisplay, TASK_FOREVER, &printScreen, &lpr, true); //adding task to the chain on creation
 
-Task tBrew(500, TASK_FOREVER, &brew, &hpr);  //adding task to the chain on creation
-Task tAnalogInput(analogreadingtimeinterval, TASK_FOREVER, &readAnalogInput, &hpr);  //adding task to the chain on creation
+Task tBrew(500, TASK_FOREVER, &brew, &hpr, true);  //adding task to the chain on creation
+Task tAnalogInput(analogreadingtimeinterval, TASK_FOREVER, &readAnalogInput, &hpr, true);  //adding task to the chain on creation
 
 void t2Callback() {
-  //do 
+  //do
 }
 
 void t3Callback() {
-  //do 
+  //do
 }
 
 
@@ -397,6 +398,7 @@ bool checkSensor(float tempInput) {
   If the value is not valid, new data is not stored.
 *****************************************************/
 void refreshTemp() {
+
   previousInput = Input ;
   if (TempSensor == 2)
   {
@@ -404,16 +406,37 @@ void refreshTemp() {
           getTemperature only updates if data is valid, otherwise "temperature" will still hold old values
     */
     temperature = 0;
-    Sensor1.getTemperature(&temperature);
-    Temperatur_C = Sensor1.calc_Celsius(&temperature);
-    if (!checkSensor(Temperatur_C) && firstreading == 0) return;  //if sensor data is not valid, abort function; Sensor must be read at least one time at system startup
-    filterPT1(Input, Temperatur_C, 400, 2000);
-    //Input = Temperatur_C;
-    if (Brewdetection != 0) {
-      //movAvg();
-    } else if (firstreading != 0) {
-      firstreading = 0;
+    static unsigned long offset = 0;
+    unsigned long startDelay = tCheckTemp.getStartDelay();
+    unsigned long executionTime = micros();
+    if (Sensor1.getTemperature(&temperature) ) {  // returns 1 if temperature was read
+      executionTime = micros() - executionTime;
+      DEBUG_print("Execution time:" );
+      DEBUG_println(executionTime);
+      DEBUG_print("Start Delay:");
+      DEBUG_println(startDelay);
+      if (startDelay == 0 && offset == 0) {
+        offset = (executionTime / 1000) - 3;
+      } else if (startDelay == 0 && (executionTime / 1000) > 10) {
+        offset = 0;
+      }
+      DEBUG_print("offset:" );
+      DEBUG_println(offset);
+      tCheckTemp.delay(intervaltempmestsic + offset); // start task xy delayed
+      Temperatur_C = Sensor1.calc_Celsius(&temperature);
+      if (!checkSensor(Temperatur_C) && firstreading == 0) return;  //if sensor data is not valid, abort function; Sensor must be read at least one time at system startup
+      filterPT1(Input, Temperatur_C, 400, 2000);
+      //Input = Temperatur_C;
+      if (Brewdetection != 0) {
+        //movAvg();
+      }
+      if (firstreading != 0) {
+        firstreading = 0;
+      }
+    } else {
+      DEBUG_println("Temp reading failed!" );
     }
+    DEBUG_println("-------------");
   }
 }
 
@@ -605,7 +628,7 @@ void printScreen() {
       u8g2.print(totalbrewtime / 1000, 0);            // aktivieren wenn Preinfusion
     }
     u8g2.print("(");
-    u8g2.print(bezugsZeitAlt);
+    u8g2.print(bezugsZeitAlt / 1000, 1);
     u8g2.print(")");
     //draw box
     u8g2.drawFrame(0, 0, 128, 64);
