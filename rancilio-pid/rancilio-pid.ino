@@ -57,12 +57,13 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);    //e.g. 0.96"
 #endif
 
 // Pin definitions
-#define pinRelayVentil    12    //Output pin for 3-way-valve
-#define pinRelayPumpe     13    //Output pin for pump
-#define pinRelayHeater    14    //Output pin for heater
-#define OLED_RESET 16     //Output pin for dispaly reset pin
-#define OLED_SCL 5        //Output pin for dispaly clock pin
-#define OLED_SDA 4        //Output pin for dispaly data pin
+#define pinRelayVentil    12    // Output pin for 3-way-valve
+#define pinRelayPumpe     13    // Output pin for pump
+#define pinRelayHeater    14    // Output pin for heater
+#define pinBrewSwitch     15    // Input pon for brew switch
+#define OLED_RESET 16     // Output pin for dispaly reset pin
+#define OLED_SCL 5        // Output pin for dispaly clock pin
+#define OLED_SDA 4        // Output pin for dispaly data pin
 
 // Display definitions
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
@@ -183,7 +184,7 @@ const int PonE = PONE;
 ******************************************************/
 const int analogPin = 0; // AI0 will be used
 int brewcounter = 10;
-int brewswitch = 0;
+int brewswitch = LOW;
 double brewtime = 25000;  //brewtime in ms
 double totalbrewtime = 0; //total brewtime set in softare or blynk
 double preinfusion = 2000;  //preinfusion time in ms
@@ -191,7 +192,7 @@ double preinfusionpause = 5000;   //preinfusion pause time in ms
 unsigned long bezugsZeit = 0;   //total brewed time
 unsigned long bezugsZeitAlt = 0;
 unsigned long startZeit = 0;    //start time of brew
-const unsigned long analogreadingtimeinterval = 10 ; // ms
+const unsigned long analogreadingtimeinterval = 100 ; // ms
 unsigned long previousMillistempanalogreading ; // ms for analogreading
 
 /********************************************************
@@ -244,6 +245,16 @@ uint16_t temperature = 0;     // internal variable used to read temeprature in 2
 float Temperatur_C = 0;       // internal variable that holds the converted temperature in °C
 
 /********************************************************
+   Pressure sensor
+   messure and verify "offset" value, should be 10% of ADC bit reading @supply volate (3.3V)
+   same goes for "fullScale", should be 90%
+******************************************************/
+int offset = 102;   // 10% of ADC input @3.3V supply
+int fullScale = 922;  // 90% of ADC input @3.3V supply
+int maxPressure = 200; // maximum pressure [psi] according to datasheet
+float inputPressure = 0;    // variable to hold pressure value from sensor
+
+/********************************************************
    BLYNK
 ******************************************************/
 //Update Intervall zur App
@@ -264,7 +275,7 @@ const unsigned long intervalDisplay = 500;
 Scheduler lpr, hpr;
 // Callback methods prototypes
 void refreshTemp();
-void t2Callback();
+void checkPressure();
 void t3Callback();
 void printScreen();
 void sendToBlynk();
@@ -272,18 +283,26 @@ void printScreen();
 void brew();
 void readAnalogInput();
 // Tasks
-//Task tCheckTemp(intervaltempmestsic, TASK_FOREVER, &refreshTemp, &lpr, true); //adding task to the chain on creation
-Task tCheckTemp(TASK_IMMEDIATE, TASK_FOREVER, &refreshTemp, &lpr, true); //adding task to the chain on creation
-Task tCheckPressure(2000, TASK_FOREVER, &t2Callback, &lpr, true); //adding task to the chain on creation
-Task tCheckWeight(3000, TASK_FOREVER, &t3Callback, &lpr, true); //adding task to the chain on creation
-Task tSendBlynk(intervalBlynk, TASK_FOREVER, &sendToBlynk, &lpr, true); //adding task to the chain on creation
-Task tPrintScreen(intervalDisplay, TASK_FOREVER, &printScreen, &lpr, true); //adding task to the chain on creation
+Task tCheckTemp(TASK_IMMEDIATE, TASK_FOREVER, &refreshTemp, &lpr, false); //adding task to the chain on creation
+Task tCheckPressure(400, TASK_FOREVER, &checkPressure, &lpr, false); //adding task to the chain on creation
+Task tCheckWeight(3000, TASK_FOREVER, &t3Callback, &lpr, false); //adding task to the chain on creation
+Task tSendBlynk(intervalBlynk, TASK_FOREVER, &sendToBlynk, &lpr, false); //adding task to the chain on creation
+Task tPrintScreen(intervalDisplay, TASK_FOREVER, &printScreen, &lpr, false); //adding task to the chain on creation
 
-Task tBrew(500, TASK_FOREVER, &brew, &hpr, true);  //adding task to the chain on creation
-Task tAnalogInput(analogreadingtimeinterval, TASK_FOREVER, &readAnalogInput, &hpr, true);  //adding task to the chain on creation
+Task tBrew(500, TASK_FOREVER, &brew, &hpr, false);  //adding task to the chain on creation
+Task tAnalogInput(analogreadingtimeinterval, TASK_FOREVER, &readAnalogInput, &hpr, false);  //adding task to the chain on creation
 
-void t2Callback() {
-  //do
+
+/********************************************************
+  Pressure sensor
+  Verify before installation: meassured analog input value (should be 3,300 V for 3,3 V supply) and respective ADC value (3,30 V = 1023)
+*****************************************************/
+void checkPressure() {    
+  inputPressure = ((filter(analogRead(analogPin)) - offset) * maxPressure * 0.0689476) / (fullScale - offset);    // pressure conversion and unit conversion [psi] -> [bar]
+  DEBUG_print("Pressure [bar]: ");
+  DEBUG_println(inputPressure);
+
+  //TODO: what if pressure is <0, error? error only if pressure low and pump running?
 }
 
 void t3Callback() {
@@ -363,9 +382,9 @@ void displayEmergencyStop(void) {
   Read analog input pin
 *****************************************************/
 void readAnalogInput() {
-  brewswitch = filter(analogRead(analogPin));
+  //brewswitch = filter(analogRead(analogPin));
+  filter(analogRead(analogPin));
 }
-
 
 /********************************************************
   check sensor value.
@@ -408,20 +427,23 @@ void refreshTemp() {
     temperature = 0;
     static unsigned long offset = 0;
     unsigned long startDelay = tCheckTemp.getStartDelay();
+    DEBUG_print("startdelay Temp:" );
+    DEBUG_println(startDelay);
     unsigned long executionTime = micros();
     if (Sensor1.getTemperature(&temperature) ) {  // returns 1 if temperature was read
       executionTime = micros() - executionTime;
-      DEBUG_print("Execution time:" );
-      DEBUG_println(executionTime);
-      DEBUG_print("Start Delay:");
-      DEBUG_println(startDelay);
+      //DEBUG_print("Execution time Temp:" );
+      //DEBUG_println(executionTime / 1000);
       if (startDelay == 0 && offset == 0) {
         offset = (executionTime / 1000) - 3;
       } else if (startDelay == 0 && (executionTime / 1000) > 10) {
         offset = 0;
       }
-      DEBUG_print("offset:" );
-      DEBUG_println(offset);
+      if (offset > intervaltempmestsic) {   // safety to prevent exception
+        offset = 0;
+      }
+      //DEBUG_print("offset:" );
+      //DEBUG_println(offset);
       tCheckTemp.delay(intervaltempmestsic + offset); // start task xy delayed
       Temperatur_C = Sensor1.calc_Celsius(&temperature);
       if (!checkSensor(Temperatur_C) && firstreading == 0) return;  //if sensor data is not valid, abort function; Sensor must be read at least one time at system startup
@@ -436,7 +458,7 @@ void refreshTemp() {
     } else {
       DEBUG_println("Temp reading failed!" );
     }
-    DEBUG_println("-------------");
+    DEBUG_println("------------");
   }
 }
 
@@ -444,11 +466,11 @@ void refreshTemp() {
     PreInfusion, Brew , if not Only PID
 ******************************************************/
 void brew() {
-  if (OnlyPID == 0) {
-    readAnalogInput();
+  if (OnlyPID == 0) {    
     unsigned long currentMillistemp = millis();
+    brewswitch = digitalRead(pinBrewSwitch);
 
-    if (brewswitch < 1000 && brewcounter > 10 && brewcounter < 43) {   //abort function for state machine from every state
+    if (brewswitch == LOW && brewcounter > 10 && brewcounter < 43) {   //abort function for state machine from every state
       brewcounter = 42;
     }
 
@@ -461,7 +483,7 @@ void brew() {
     // state machine for brew
     switch (brewcounter) {
       case 10:    // waiting step for brew switch turning on
-        if (brewswitch > 1000) {
+        if (brewswitch == HIGH) {
           startZeit = millis();
           brewcounter = 20;
           kaltstart = false;    // force reset kaltstart if shot is pulled
@@ -507,7 +529,7 @@ void brew() {
         brewcounter = 43;
         break;
       case 43:    // waiting for brewswitch off position
-        if (brewswitch < 1000) {
+        if (brewswitch == LOW) {
           digitalWrite(pinRelayVentil, relayOFF);
           digitalWrite(pinRelayPumpe, relayOFF);
           currentMillistemp = 0;
@@ -525,6 +547,10 @@ void brew() {
     send data to display
 ******************************************************/
 void printScreen() {
+  unsigned long startDelay = tPrintScreen.getStartDelay();
+  DEBUG_print("startdelay Screen:" );
+  DEBUG_println(startDelay);
+  unsigned long executionTime = millis();
   if (!sensorError) {
     u8g2.clearBuffer();
     u8g2.drawXBMP(0, 0, logo_width, logo_height, logo_bits_u8g2);   //draw temp icon
@@ -659,6 +685,9 @@ void printScreen() {
     }
     u8g2.sendBuffer();
   }
+  //DEBUG_print("execution time screen: ");
+  //DEBUG_println(millis() - executionTime);
+  DEBUG_println("-------------");
 }
 
 /********************************************************
@@ -667,6 +696,10 @@ void printScreen() {
 
 void sendToBlynk() {
   if (Offlinemodus == 1) return;
+  unsigned long startDelay = tSendBlynk.getStartDelay();
+  DEBUG_print("startdelay Blynk:" );
+  DEBUG_println(startDelay);
+  unsigned long executionTime = millis();
   if (Blynk.connected()) {
     if (blynksendcounter == 1) {
       Blynk.virtualWrite(V2, Input);
@@ -691,6 +724,9 @@ void sendToBlynk() {
     }
     blynksendcounter++;
   }
+  //DEBUG_print("execution time blynk: ");
+  //DEBUG_println(millis() - executionTime);
+  DEBUG_println("-------------");
 }
 
 /********************************************************
@@ -777,6 +813,9 @@ void initPins() {
   digitalWrite(pinRelayVentil, relayOFF);
   digitalWrite(pinRelayPumpe, relayOFF);
   digitalWrite(pinRelayHeater, LOW);
+
+  //Inputs
+  pinMode(pinBrewSwitch, INPUT);
   DEBUG_println(F("done"));
 }
 
@@ -992,7 +1031,20 @@ void initTaskScheduler() {
   tAnalogInput.setId(50);
 
   lpr.setHighPriorityScheduler(&hpr);
-  lpr.enableAll(true); // this will recursively enable the higher priority tasks as well
+
+  tCheckTemp.delay();
+  tSendBlynk.delay(40);
+  tPrintScreen.delay(60);
+
+  //lpr.enableAll(true); // this will recursively enable the higher priority tasks as well
+  tCheckTemp.enable();
+  tCheckPressure.enable();
+  //tCheckWeight.enable();
+  tSendBlynk.enable();
+  tPrintScreen.enable();
+
+  tBrew.enable();
+  //tAnalogInput.enable();
 
   DEBUG_println(F("done"));
 }
