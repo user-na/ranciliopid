@@ -61,16 +61,24 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);    //e.g. 0.96"
 #define pinRelayPumpe     13    // Output pin for pump
 #define pinRelayHeater    14    // Output pin for heater
 #define pinBrewSwitch     15    // Input pon for brew switch
-#define OLED_RESET 16     // Output pin for dispaly reset pin
 #define OLED_SCL 5        // Output pin for dispaly clock pin
 #define OLED_SDA 4        // Output pin for dispaly data pin
+#define ONE_WIRE_BUS 2    // Data wire is plugged into port 2 on the Arduino
+#define hxDAT 0   // Input pin to receive data from HX711
+#define hxCLK 16   // Output pin for Clock to HX711
+
+/*
+   usable pins:
+   GPIO 0 is high at boot
+
+*/
 
 // Display definitions
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels  
 
 // one wire definition
-#define ONE_WIRE_BUS 2  // Data wire is plugged into port 2 on the Arduino
+
 
 /********************************************************
   definitions below must be changed in the userConfig.h file
@@ -130,7 +138,7 @@ int relayON, relayOFF;          // used for relay trigger type. Do not change!
 bool kaltstart = true;       // true = Rancilio started for first time
 bool emergencyStop = false;  // Notstop bei zu hoher Temperatur
 
-int inX = 0, inY = 0, inOld = 0, inSum = 0; //used for filter()
+float inX = 0, inY = 0, inOld = 0, inSum = 0; //used for filter()
 int bars = 0; //used for getSignalStrength()
 double Q = 0; // thermal energy variable
 unsigned long heatingTime = 0;  //time where output=100%; used for FeedForwardControl
@@ -192,8 +200,6 @@ double preinfusionpause = 5000;   //preinfusion pause time in ms
 unsigned long bezugsZeit = 0;   //total brewed time
 unsigned long bezugsZeitAlt = 0;
 unsigned long startZeit = 0;    //start time of brew
-const unsigned long analogreadingtimeinterval = 100 ; // ms
-unsigned long previousMillistempanalogreading ; // ms for analogreading
 
 /********************************************************
    Sensor check
@@ -206,7 +212,7 @@ int maxErrorCounter = 10 ;  //depends on intervaltempmes* , define max seconds f
    PID
 ******************************************************/
 unsigned long previousMillistemp;  // initialisation at the end of init()
-const unsigned long intervaltempmestsic = 800 ;
+const unsigned long intervaltempmestsic = 400 ;
 int pidMode = 1; //1 = Automatic, 0 = Manual
 
 const unsigned int windowSize = 1000;
@@ -249,8 +255,8 @@ float Temperatur_C = 0;       // internal variable that holds the converted temp
    messure and verify "offset" value, should be 10% of ADC bit reading @supply volate (3.3V)
    same goes for "fullScale", should be 90%
 ******************************************************/
-int offset = 102;   // 10% of ADC input @3.3V supply
-int fullScale = 922;  // 90% of ADC input @3.3V supply
+int offset = 116;   // 10% of ADC input @3.3V supply = 102
+int fullScale = 922;  // 90% of ADC input @3.3V supply = 922
 int maxPressure = 200; // maximum pressure [psi] according to datasheet
 float inputPressure = 0;    // variable to hold pressure value from sensor
 
@@ -276,36 +282,92 @@ Scheduler lpr, hpr;
 // Callback methods prototypes
 void refreshTemp();
 void checkPressure();
-void t3Callback();
+void checkWeight();
 void printScreen();
 void sendToBlynk();
 void printScreen();
 void brew();
-void readAnalogInput();
 // Tasks
 Task tCheckTemp(TASK_IMMEDIATE, TASK_FOREVER, &refreshTemp, &lpr, false); //adding task to the chain on creation
-Task tCheckPressure(400, TASK_FOREVER, &checkPressure, &lpr, false); //adding task to the chain on creation
-Task tCheckWeight(3000, TASK_FOREVER, &t3Callback, &lpr, false); //adding task to the chain on creation
+Task tCheckPressure(100, TASK_FOREVER, &checkPressure, &lpr, false); //adding task to the chain on creation
+Task tCheckWeight(3000, TASK_FOREVER, &checkWeight, &lpr, false); //adding task to the chain on creation
 Task tSendBlynk(intervalBlynk, TASK_FOREVER, &sendToBlynk, &lpr, false); //adding task to the chain on creation
 Task tPrintScreen(intervalDisplay, TASK_FOREVER, &printScreen, &lpr, false); //adding task to the chain on creation
 
 Task tBrew(500, TASK_FOREVER, &brew, &hpr, false);  //adding task to the chain on creation
-Task tAnalogInput(analogreadingtimeinterval, TASK_FOREVER, &readAnalogInput, &hpr, false);  //adding task to the chain on creation
+
+
+/********************************************************
+   BLYNK WERTE EINLESEN und Definition der PINS
+******************************************************/
+
+BLYNK_WRITE(V4) {
+  aggKp = param.asDouble();
+}
+
+BLYNK_WRITE(V5) {
+  aggTn = param.asDouble();
+}
+BLYNK_WRITE(V6) {
+  aggTv =  param.asDouble();
+}
+BLYNK_WRITE(V7) {
+  setPoint = param.asDouble();
+}
+
+BLYNK_WRITE(V8) {
+  brewtime = param.asDouble() * 1000;
+}
+
+BLYNK_WRITE(V9) {
+  preinfusion = param.asDouble() * 1000;
+}
+
+BLYNK_WRITE(V10) {
+  preinfusionpause = param.asDouble() * 1000;
+}
+BLYNK_WRITE(V13)
+{
+  pidON = param.asInt();
+}
+BLYNK_WRITE(V30)
+{
+  aggbKp = param.asDouble();//
+}
+BLYNK_WRITE(V31) {
+  aggbTn = param.asDouble();
+}
+BLYNK_WRITE(V32) {
+  aggbTv =  param.asDouble();
+}
+BLYNK_WRITE(V33) {
+  brewtimersoftware =  param.asDouble();
+}
+BLYNK_WRITE(V34) {
+  brewboarder =  param.asDouble();
+}
 
 
 /********************************************************
   Pressure sensor
   Verify before installation: meassured analog input value (should be 3,300 V for 3,3 V supply) and respective ADC value (3,30 V = 1023)
 *****************************************************/
-void checkPressure() {    
-  inputPressure = ((filter(analogRead(analogPin)) - offset) * maxPressure * 0.0689476) / (fullScale - offset);    // pressure conversion and unit conversion [psi] -> [bar]
-  DEBUG_print("Pressure [bar]: ");
-  DEBUG_println(inputPressure);
+void checkPressure() {
+  float inputPressurPT1 = 0;
+  float inputPressureF = 0;
+  inputPressure = ((analogRead(analogPin) - offset) * maxPressure * 0.0689476) / (fullScale - offset);    // pressure conversion and unit conversion [psi] -> [bar]
+  inputPressureF = filter(inputPressure);
+  filterPT1_2(inputPressurPT1, inputPressure, 100, 2000);
+  DEBUG_print(inputPressure);
+  DEBUG_print(" ");
+  DEBUG_print(inputPressureF);
+  DEBUG_print(" ");
+  DEBUG_println(inputPressurPT1);
 
   //TODO: what if pressure is <0, error? error only if pressure low and pump running?
 }
 
-void t3Callback() {
+void checkWeight() {
   //do
 }
 
@@ -334,6 +396,18 @@ void testEmergencyStop() {
 **  genutzte Globale Variablen:   keine             **
 **************************************************************************************************/
 void filterPT1(double &FiltVal, float NewVal, unsigned long Periode, unsigned long Tau) {
+  static  unsigned long lastRun = 0;
+  unsigned long FF = Tau / Periode;
+  if (millis() - lastRun < Periode) return;
+  if (firstreading) {
+    FiltVal = NewVal;   //Prevent ramping up from zero to real value at system startup
+    return;
+  }
+  lastRun = millis();
+  FiltVal = ((FiltVal * FF) + NewVal) / (FF + 1);
+}
+
+void filterPT1_2(float &FiltVal, float NewVal, unsigned long Periode, unsigned long Tau) {
   static  unsigned long lastRun = 0;
   unsigned long FF = Tau / Periode;
   if (millis() - lastRun < Periode) return;
@@ -379,14 +453,6 @@ void displayEmergencyStop(void) {
 }
 
 /********************************************************
-  Read analog input pin
-*****************************************************/
-void readAnalogInput() {
-  //brewswitch = filter(analogRead(analogPin));
-  filter(analogRead(analogPin));
-}
-
-/********************************************************
   check sensor value.
   If < 0 or difference between old and new >25, then increase error.
   If error is equal to maxErrorCounter, then set sensorError
@@ -397,14 +463,14 @@ bool checkSensor(float tempInput) {
   if ( badCondition && !sensorError) {
     error++;
     sensorOK = false;
-    DEBUG_print("WARN: temperature sensor reading: consec_errors = ");    DEBUG_print(error);    DEBUG_print(", temp_current = ");    DEBUG_println(tempInput);
+    //DEBUG_print("WARN: temperature sensor reading: consec_errors = ");    DEBUG_print(error);    DEBUG_print(", temp_current = ");    DEBUG_println(tempInput);
   } else if (badCondition == false && sensorOK == false) {
     error = 0;
     sensorOK = true;
   }
   if (error >= maxErrorCounter && !sensorError) {
     sensorError = true ;
-    DEBUG_print("ERROR: temperature sensor malfunction: emp_current = ");    DEBUG_println(tempInput);
+    //DEBUG_print("ERROR: temperature sensor malfunction: emp_current = ");    DEBUG_println(tempInput);
   } else if (error == 0 && sensorError) {
     sensorError = false ;
   }
@@ -427,13 +493,15 @@ void refreshTemp() {
     temperature = 0;
     static unsigned long offset = 0;
     unsigned long startDelay = tCheckTemp.getStartDelay();
-    DEBUG_print("startdelay Temp:" );
-    DEBUG_println(startDelay);
+    if (startDelay > 0 ) {
+      //DEBUG_print("startdelay Temp:" );
+      //DEBUG_println(startDelay);
+    }
     unsigned long executionTime = micros();
     if (Sensor1.getTemperature(&temperature) ) {  // returns 1 if temperature was read
       executionTime = micros() - executionTime;
-      //DEBUG_print("Execution time Temp:" );
-      //DEBUG_println(executionTime / 1000);
+      //DEBUG_print("Execution_time_Temp: " );
+      //DEBUG_println(executionTime);
       if (startDelay == 0 && offset == 0) {
         offset = (executionTime / 1000) - 3;
       } else if (startDelay == 0 && (executionTime / 1000) > 10) {
@@ -444,7 +512,13 @@ void refreshTemp() {
       }
       //DEBUG_print("offset:" );
       //DEBUG_println(offset);
+      //Define offsets for all tasks here!
       tCheckTemp.delay(intervaltempmestsic + offset); // start task xy delayed
+      tCheckPressure.delay(10);
+      //tCheckWeight.delay();
+      tSendBlynk.delay(20);
+      tPrintScreen.delay(40);
+
       Temperatur_C = Sensor1.calc_Celsius(&temperature);
       if (!checkSensor(Temperatur_C) && firstreading == 0) return;  //if sensor data is not valid, abort function; Sensor must be read at least one time at system startup
       filterPT1(Input, Temperatur_C, 400, 2000);
@@ -456,9 +530,8 @@ void refreshTemp() {
         firstreading = 0;
       }
     } else {
-      DEBUG_println("Temp reading failed!" );
+      //DEBUG_println("Temp reading failed!" );
     }
-    DEBUG_println("------------");
   }
 }
 
@@ -466,7 +539,7 @@ void refreshTemp() {
     PreInfusion, Brew , if not Only PID
 ******************************************************/
 void brew() {
-  if (OnlyPID == 0) {    
+  if (OnlyPID == 0) {
     unsigned long currentMillistemp = millis();
     brewswitch = digitalRead(pinBrewSwitch);
 
@@ -485,7 +558,11 @@ void brew() {
       case 10:    // waiting step for brew switch turning on
         if (brewswitch == HIGH) {
           startZeit = millis();
-          brewcounter = 20;
+          if(preinfusion == 0){
+            brewcounter = 40;
+          } else {
+            brewcounter = 20;
+          }          
           kaltstart = false;    // force reset kaltstart if shot is pulled
         }
         break;
@@ -548,8 +625,10 @@ void brew() {
 ******************************************************/
 void printScreen() {
   unsigned long startDelay = tPrintScreen.getStartDelay();
-  DEBUG_print("startdelay Screen:" );
-  DEBUG_println(startDelay);
+  if (startDelay > 0 ) {
+    //DEBUG_print("startdelay Screen:" );
+    //DEBUG_println(startDelay);
+  }
   unsigned long executionTime = millis();
   if (!sensorError) {
     u8g2.clearBuffer();
@@ -604,18 +683,21 @@ void printScreen() {
 
     // PID Werte ueber heatbar
     u8g2.setCursor(40, 48);
-
-    u8g2.print(bPID.GetKp(), 0); // P
-    u8g2.print("|");
-    if (bPID.GetKi() != 0) {
+    /* test druck deaktivierung
+      u8g2.print(bPID.GetKp(), 0); // P
+      u8g2.print("|");
+      if (bPID.GetKi() != 0) {
       u8g2.print(bPID.GetKp() / bPID.GetKi(), 0);;
-    } // I
-    else
-    {
+      } // I
+      else
+      {
       u8g2.print("0");
-    }
-    u8g2.print("|");
-    u8g2.print(bPID.GetKd() / bPID.GetKp(), 0); // D
+      }
+      u8g2.print("|");
+      u8g2.print(bPID.GetKd() / bPID.GetKp(), 0); // D
+    */
+    u8g2.print("P: ");
+    u8g2.print(inputPressure);
     u8g2.setCursor(98, 48);
     if (pidMode == 1) {
       if (Output < 99) {
@@ -683,22 +765,25 @@ void printScreen() {
       u8g2.setCursor(40, 2);
       u8g2.print("Offlinemodus");
     }
+    u8g2.setCursor(88, 2);    //TEST
+    u8g2.print( WiFi.RSSI());//TEST
     u8g2.sendBuffer();
   }
-  //DEBUG_print("execution time screen: ");
+  //DEBUG_print("execution_time_screen: ");
   //DEBUG_println(millis() - executionTime);
-  DEBUG_println("-------------");
+  //DEBUG_println("-------------");
 }
 
 /********************************************************
   send data to Blynk server
 *****************************************************/
-
 void sendToBlynk() {
   if (Offlinemodus == 1) return;
   unsigned long startDelay = tSendBlynk.getStartDelay();
-  DEBUG_print("startdelay Blynk:" );
-  DEBUG_println(startDelay);
+  if (startDelay > 0 ) {
+    //DEBUG_print("startdelay Blynk:" );
+    //DEBUG_println(startDelay);
+  }
   unsigned long executionTime = millis();
   if (Blynk.connected()) {
     if (blynksendcounter == 1) {
@@ -717,24 +802,25 @@ void sendToBlynk() {
       Blynk.virtualWrite(V36, heatrateaveragemin);
     }
     if (grafana == 1 && blynksendcounter >= 6) {
-      Blynk.virtualWrite(V60, Input, Output, bPID.GetKp(), bPID.GetKi(), bPID.GetKd(), setPoint );
+      Blynk.virtualWrite(V60, Input, Output, bPID.GetKp(), bPID.GetKi(), WiFi.RSSI(), setPoint );
       blynksendcounter = 0;
     } else if (grafana == 0 && blynksendcounter >= 5) {
       blynksendcounter = 0;
     }
     blynksendcounter++;
   }
-  //DEBUG_print("execution time blynk: ");
+  // DEBUG_print("execution_time_blynk: ");
   //DEBUG_println(millis() - executionTime);
-  DEBUG_println("-------------");
+  //DEBUG_println("-------------");
 }
+
 
 /********************************************************
   after ~28 cycles the input is set to 99,66% if the real input value
   sum of inX and inY multiplier must be 1
   increase inX multiplier to make the filter faster
 *****************************************************/
-int filter(int input) {
+float filter(float input) {
   inX = input * 0.3;
   inY = inOld * 0.7;
   inSum = inX + inY;
@@ -876,10 +962,17 @@ void initWiFi() {
 }
 
 void initBlynk() {
-  //if (WiFi.status() == WL_CONNECTED) {}
-  //DEBUG_println(F("INIT: Initializing Blynk (timeout 20s) ... "));
-  //Blynk.config(auth, blynkaddress, blynkport) ;
-  //Blynk.connect(20000);   //try blynk connection
+  if (WiFi.status() == WL_CONNECTED) {
+    DEBUG_print(F("INIT: Initializing Blynk (timeout 20s) ... "));
+    Blynk.config(auth, blynkaddress, blynkport) ;
+    Blynk.connect(20000);   //try blynk connection
+    if (Blynk.connected()) {
+      DEBUG_print(F("done"));
+      Blynk.syncAll();
+    } else {
+      DEBUG_print(F("failed"));
+    }
+  }
 }
 
 void initFallback() {
@@ -1028,23 +1121,17 @@ void initCrashMonitor() {
 void initTaskScheduler() {
   DEBUG_print(F("INFO: Starting task scheduler..."));
   tBrew.setId(40);
-  tAnalogInput.setId(50);
 
   lpr.setHighPriorityScheduler(&hpr);
 
-  tCheckTemp.delay();
-  tSendBlynk.delay(40);
-  tPrintScreen.delay(60);
-
   //lpr.enableAll(true); // this will recursively enable the higher priority tasks as well
   tCheckTemp.enable();
-  tCheckPressure.enable();
-  //tCheckWeight.enable();
-  tSendBlynk.enable();
-  tPrintScreen.enable();
+  tCheckPressure.enableDelayed();
+  //tCheckWeight.enableDelayed();
+  tSendBlynk.enableDelayed(20);
+  tPrintScreen.enableDelayed(80);
 
-  tBrew.enable();
-  //tAnalogInput.enable();
+  tBrew.enableDelayed();
 
   DEBUG_println(F("done"));
 }
@@ -1095,13 +1182,12 @@ void loop() {
   lpr.execute();    // run task scheduler
   //ESPCrashMonitor.iAmAlive();  // Signal that we are alive first to get the full timeout period.
 
-
   //check if PID should run or not. If not, set to manuel and force output to zero
   if (pidON == 0 && pidMode == 1) {
     pidMode = 0;
     bPID.SetMode(pidMode);
     Output = 0 ;
-  } else if (pidON == 1 && pidMode == 0 && !sensorError && !emergencyStop && backflushState == 10 && brewcounter == 10) {
+  } else if (pidON == 1 && pidMode == 0) {
     pidMode = 1;
     bPID.SetMode(pidMode);
   }
