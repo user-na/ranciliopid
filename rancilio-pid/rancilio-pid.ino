@@ -13,9 +13,10 @@
 #include "PID_v1.h" //for PID calculation
 #include <OneWire.h>    //Library for one wire communication to dallas temptemp sensor
 #include "TSIC.h"       //Library for TSIC temp sensor
+//#include "HX711_ADC/src/HX711_ADC.h"
+#include <HX711_ADC.h>
 #include <BlynkSimpleEsp8266.h>
 #include "icon.h"   //user icons for display
-#include "ESPCrashMonitor-master/ESPCrashMonitor.h"
 #include "RemoteDebug.h"        //https://github.com/JoaoLopesF/RemoteDebug
 // task scheduler definitions must be before including
 #define _TASK_PRIORITY      // support for layered task prioritization
@@ -60,12 +61,12 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);    //e.g. 0.96"
 #define pinRelayVentil    12    // Output pin for 3-way-valve
 #define pinRelayPumpe     13    // Output pin for pump
 #define pinRelayHeater    14    // Output pin for heater
-#define pinBrewSwitch     15    // Input pon for brew switch
-#define OLED_SCL 5        // Output pin for dispaly clock pin
-#define OLED_SDA 4        // Output pin for dispaly data pin
-#define ONE_WIRE_BUS 2    // Data wire is plugged into port 2 on the Arduino
-#define hxDAT 0   // Input pin to receive data from HX711
-#define hxCLK 16   // Output pin for Clock to HX711
+#define pinBrewSwitch     15    // Input pin for brew switch
+#define OLED_SCL      5         // Output pin for dispaly clock pin
+#define OLED_SDA      4         // Output pin for dispaly data pin
+#define ONE_WIRE_BUS  2         // Data wire is plugged into port 2 on the Arduino
+#define hxDAT         16        // Input pin to receive data from HX711   GPIO0 = D3
+#define hxCLK         0         // Output pin for Clock to HX711   GPIO16 = D0
 
 /*
    usable pins:
@@ -105,6 +106,7 @@ const unsigned long stabilisingTime = STABILISINGTIME;
 const float emptyCorrectionFactor = EMPTYCORRECTIONFACTOR;
 const float normalCorrectionFactor = NORMALCORRECTIONFACTOR;
 const bool delayHeating = DELAYHEATING;
+float weightSetpoint = WEIGHTSETPOINT;
 
 // Wifi
 const char* hostname = HOSTNAME;
@@ -153,6 +155,7 @@ int backflushON = 0;            // 1 = activate backflush
 int flushCycles = 0;            // number of active flush cycles
 int backflushState = 10;        // counter for state machine
 bool Ffwd = 0;
+int blynkSendCounter = 1;       // send counter for blynk
 
 /********************************************************
    moving average - brewdetection
@@ -211,13 +214,10 @@ int maxErrorCounter = 10 ;  //depends on intervaltempmes* , define max seconds f
 /********************************************************
    PID
 ******************************************************/
-unsigned long previousMillistemp;  // initialisation at the end of init()
-const unsigned long intervaltempmestsic = 400 ;
 int pidMode = 1; //1 = Automatic, 0 = Manual
 
 const unsigned int windowSize = 1000;
 volatile unsigned int isrCounter = 0;  // counter for ISR
-unsigned long windowStartTime;
 double Input, Output;
 double previousInput = 0;
 
@@ -249,6 +249,17 @@ PID bPID(&Input, &Output, &setPoint, aggKp, aggKi, aggKd, PonE, DIRECT);    //PI
 TSIC Sensor1(ONE_WIRE_BUS);   // only Signalpin, VCCpin unused by default
 uint16_t temperature = 0;     // internal variable used to read temeprature in 2byte from i2c
 float Temperatur_C = 0;       // internal variable that holds the converted temperature in °C
+unsigned long tempTaskOffset = 0;     // used for task offset
+
+/********************************************************
+   HX711 load cell (scale)
+******************************************************/
+float calibrationValue = 3195.83; // use calibration example to get value
+float weight = 0;   // value from HX711
+float weightPreBrew = 0;  // value of scale before wrew started
+float weightBrew = 0;  // weight value of brew
+float scaleDelayValue = 9;  //value in gramm that takes still flows onto the scale after brew is stopped
+HX711_ADC LoadCell(hxDAT, hxCLK);
 
 /********************************************************
    Pressure sensor
@@ -261,40 +272,40 @@ int maxPressure = 200; // maximum pressure [psi] according to datasheet
 float inputPressure = 0;    // variable to hold pressure value from sensor
 
 /********************************************************
-   BLYNK
+   Update intervall
+   If changed, task offset must be checekd!
 ******************************************************/
-//Update Intervall zur App
-unsigned long previousMillisBlynk;  // initialisation at the end of init(), to not count boot time
-const unsigned long intervalBlynk = 1000;
-int blynksendcounter = 1;
 
-//Update für Display
-unsigned long previousMillisDisplay;  // initialisation at the end of init(), to not count boot time
-const unsigned long intervalDisplay = 500;
+const unsigned long intervalBlynk = 1000;   // Blynk
+const unsigned long intervalDisplay = 500;  // Display
+const unsigned long intervalPressure = 200; // Pressure sensor
+const unsigned long intervalWeight = 200;   // weight scale
+const unsigned long intervalBrew = 100;     // brew
+const unsigned long intervalTempTSIC = 500 ; // temperature
 
 /********************************************************
   Task Scheduler
-  Current test employs two priority layers:
-  Base scheduler runs tasks t1, t2 and t3
-  High priority scheduler runs tasks t4 and t5
+  lpr = low priority tasks
+  hpr = high priority tasks
 *****************************************************/
 Scheduler lpr, hpr;
 // Callback methods prototypes
-void refreshTemp();
-void checkPressure();
-void checkWeight();
-void printScreen();
-void sendToBlynk();
-void printScreen();
-void brew();
-// Tasks
-Task tCheckTemp(TASK_IMMEDIATE, TASK_FOREVER, &refreshTemp, &lpr, false); //adding task to the chain on creation
-Task tCheckPressure(100, TASK_FOREVER, &checkPressure, &lpr, false); //adding task to the chain on creation
-Task tCheckWeight(3000, TASK_FOREVER, &checkWeight, &lpr, false); //adding task to the chain on creation
+void checkTemp();     // ~ 3,5 ms execution time (worst case szenario = ~103ms)
+void checkPressure(); // 0,4 - 0,7 ms execution time, depending on filter usage
+void checkWeight();   // ~0,15 ms execution time
+void sendToBlynk();   // ~3 ms execution time
+void printDisplay();   // ~43 ms execution time
+void brew();          // ~0,3 - 0,6 ms execution time
+// high Prio Tasks
+Task tBrew(intervalBrew, TASK_FOREVER, &brew, &hpr, false);  //adding task to the chain on creation
+// low Prio Tasks
+Task tPrintDisplay(intervalDisplay, TASK_FOREVER, &printDisplay, &lpr, false); //adding task to the chain on creation
+Task tCheckTemp(intervalTempTSIC, TASK_FOREVER, &checkTemp, &lpr, false); //adding task to the chain on creation
+Task tCheckPressure(intervalPressure, TASK_FOREVER, &checkPressure, &lpr, false); //adding task to the chain on creation
+Task tCheckWeight(intervalWeight, TASK_FOREVER, &checkWeight, &lpr, false); //adding task to the chain on creation
 Task tSendBlynk(intervalBlynk, TASK_FOREVER, &sendToBlynk, &lpr, false); //adding task to the chain on creation
-Task tPrintScreen(intervalDisplay, TASK_FOREVER, &printScreen, &lpr, false); //adding task to the chain on creation
 
-Task tBrew(500, TASK_FOREVER, &brew, &hpr, false);  //adding task to the chain on creation
+
 
 
 /********************************************************
@@ -304,7 +315,6 @@ Task tBrew(500, TASK_FOREVER, &brew, &hpr, false);  //adding task to the chain o
 BLYNK_WRITE(V4) {
   aggKp = param.asDouble();
 }
-
 BLYNK_WRITE(V5) {
   aggTn = param.asDouble();
 }
@@ -314,21 +324,22 @@ BLYNK_WRITE(V6) {
 BLYNK_WRITE(V7) {
   setPoint = param.asDouble();
 }
-
 BLYNK_WRITE(V8) {
   brewtime = param.asDouble() * 1000;
 }
-
 BLYNK_WRITE(V9) {
   preinfusion = param.asDouble() * 1000;
 }
-
 BLYNK_WRITE(V10) {
   preinfusionpause = param.asDouble() * 1000;
 }
 BLYNK_WRITE(V13)
 {
   pidON = param.asInt();
+}
+BLYNK_WRITE(V15)
+{
+  weightSetpoint = param.asFloat();
 }
 BLYNK_WRITE(V30)
 {
@@ -347,28 +358,84 @@ BLYNK_WRITE(V34) {
   brewboarder =  param.asDouble();
 }
 
-
+void filterPT1_2(float &FiltVal, float NewVal, unsigned long Periode, unsigned long Tau) {
+  static  unsigned long lastRun = 0;
+  unsigned long FF = Tau / Periode;
+  if (millis() - lastRun < Periode) return;
+  lastRun = millis();
+  FiltVal = ((FiltVal * FF) + NewVal) / (FF + 1);
+}
 /********************************************************
   Pressure sensor
   Verify before installation: meassured analog input value (should be 3,300 V for 3,3 V supply) and respective ADC value (3,30 V = 1023)
 *****************************************************/
 void checkPressure() {
-  float inputPressurPT1 = 0;
+  static float inputPressurPT1 = 0;
   float inputPressureF = 0;
+  unsigned long startDelay = tCheckPressure.getStartDelay();
+  unsigned long executionTime = micros();
+  //DEBUG_print("start pressure:" );
+  //DEBUG_println(millis());
+  unsigned long overrun = tCheckPressure.getOverrun();
+  if (overrun < 0) {
+    DEBUG_print("overrun pressure = ");
+    DEBUG_println(overrun);
+  }
+  if (startDelay > 0 ) {
+    DEBUG_print("startdelay pressure:" );
+    DEBUG_println(startDelay);
+  }
   inputPressure = ((analogRead(analogPin) - offset) * maxPressure * 0.0689476) / (fullScale - offset);    // pressure conversion and unit conversion [psi] -> [bar]
   inputPressureF = filter(inputPressure);
   filterPT1_2(inputPressurPT1, inputPressure, 100, 2000);
-  DEBUG_print(inputPressure);
-  DEBUG_print(" ");
-  DEBUG_print(inputPressureF);
-  DEBUG_print(" ");
-  DEBUG_println(inputPressurPT1);
+  /*
+    DEBUG_print(inputPressure);
+    DEBUG_print(" ");
+    DEBUG_print(inputPressureF);
+    DEBUG_print(" ");
+    DEBUG_println(inputPressurPT1);
+  */
 
   //TODO: what if pressure is <0, error? error only if pressure low and pump running?
+  //executionTime = micros() - executionTime;
+  //DEBUG_print("Execution_time_pressure(micros): " );
+  //DEBUG_println(executionTime);
 }
 
 void checkWeight() {
-  //do
+  static boolean newDataReady = 0;
+  unsigned long startDelay = tCheckWeight.getStartDelay();
+  unsigned long executionTime = micros();
+  //DEBUG_print("start weight:" );
+  //DEBUG_println(millis());
+  unsigned long overrun = tCheckWeight.getOverrun();
+  if (overrun < 0) {
+    DEBUG_print("overrun weight = ");
+    DEBUG_println(overrun);
+  }
+  if (startDelay > 0 ) {
+    DEBUG_print("startdelay weight:" );
+    DEBUG_println(startDelay);
+  }
+
+  // check for new data/start next conversion:
+  if (LoadCell.update()) {
+    newDataReady = true;
+  }
+
+  // get smoothed value from the dataset:
+  if (newDataReady) {
+    weight = LoadCell.getData();
+    newDataReady = 0;
+    executionTime = micros() - executionTime;
+    //DEBUG_print("Execution_time_weight(micros): " );
+    //DEBUG_println(executionTime);
+  }
+
+
+  //todo, set flag if scale not working -> work with it in brew
+  //Plausibilitätsprüfung, z.B. wenn größer als (Zeitabhängig) max flow rate
+  // todo, wird der integ. gleitende mittelwert benötigt? oder einfach raw, und die spikes weglassne? --> ist die Funktion schneller?
 }
 
 
@@ -407,17 +474,7 @@ void filterPT1(double &FiltVal, float NewVal, unsigned long Periode, unsigned lo
   FiltVal = ((FiltVal * FF) + NewVal) / (FF + 1);
 }
 
-void filterPT1_2(float &FiltVal, float NewVal, unsigned long Periode, unsigned long Tau) {
-  static  unsigned long lastRun = 0;
-  unsigned long FF = Tau / Periode;
-  if (millis() - lastRun < Periode) return;
-  if (firstreading) {
-    FiltVal = NewVal;   //Prevent ramping up from zero to real value at system startup
-    return;
-  }
-  lastRun = millis();
-  FiltVal = ((FiltVal * FF) + NewVal) / (FF + 1);
-}
+
 
 
 /********************************************************
@@ -439,16 +496,8 @@ void displayEmergencyStop(void) {
   u8g2.print((char)176);
   u8g2.print("C");
 
-  //draw current temp in icon
-  if (isrCounter < 500) {
-    u8g2.drawLine(9, 48, 9, 5);
-    u8g2.drawLine(10, 48, 10, 4);
-    u8g2.drawLine(11, 48, 11, 3);
-    u8g2.drawLine(12, 48, 12, 4);
-    u8g2.drawLine(13, 48, 13, 5);
-    u8g2.setCursor(32, 4);
-    u8g2.print("HEATING STOPPED");
-  }
+  u8g2.print("HEATING STOPPED");
+
   u8g2.sendBuffer();
 }
 
@@ -482,42 +531,62 @@ bool checkSensor(float tempInput) {
   Each time checkSensor() is called to verify the value.
   If the value is not valid, new data is not stored.
 *****************************************************/
-void refreshTemp() {
-
+void checkTemp() {
   previousInput = Input ;
-  if (TempSensor == 2)
-  {
+  if (TempSensor == 2) {
     /*  variable "temperature" must be set to zero, before reading new data
           getTemperature only updates if data is valid, otherwise "temperature" will still hold old values
     */
     temperature = 0;
-    static unsigned long offset = 0;
+    unsigned long executionTime = micros();
     unsigned long startDelay = tCheckTemp.getStartDelay();
     if (startDelay > 0 ) {
-      //DEBUG_print("startdelay Temp:" );
-      //DEBUG_println(startDelay);
+      DEBUG_print("startdelay Temp:" );
+      DEBUG_println(startDelay);
     }
-    unsigned long executionTime = micros();
+    unsigned long overrun = tCheckTemp.getOverrun();
+    if (overrun < 0) {
+      DEBUG_print("overrun temp = ");
+      DEBUG_println(overrun);
+    }
+    //DEBUG_print("start temp:" );
+    //DEBUG_println(millis());
+
     if (Sensor1.getTemperature(&temperature) ) {  // returns 1 if temperature was read
       executionTime = micros() - executionTime;
       //DEBUG_print("Execution_time_Temp: " );
       //DEBUG_println(executionTime);
-      if (startDelay == 0 && offset == 0) {
-        offset = (executionTime / 1000) - 3;
-      } else if (startDelay == 0 && (executionTime / 1000) > 10) {
-        offset = 0;
+      if (startDelay == 0 && tempTaskOffset == 0) {
+        tempTaskOffset = (executionTime / 1000) - 4;
+        DEBUG_print("offset: " );
+        DEBUG_println(tempTaskOffset);
+      } else if (startDelay == 0 && (executionTime) > 10000) {
+        tempTaskOffset = 0;
       }
-      if (offset > intervaltempmestsic) {   // safety to prevent exception
-        offset = 0;
+      if (tempTaskOffset > intervalTempTSIC) {   // safety to prevent exception
+        tempTaskOffset = 0;
       }
-      //DEBUG_print("offset:" );
-      //DEBUG_println(offset);
-      //Define offsets for all tasks here!
-      tCheckTemp.delay(intervaltempmestsic + offset); // start task xy delayed
-      tCheckPressure.delay(10);
-      //tCheckWeight.delay();
-      tSendBlynk.delay(20);
-      tPrintScreen.delay(40);
+
+      if (tempTaskOffset != 0 && executionTime < 10000) {
+        tCheckTemp.setInterval(intervalTempTSIC + tempTaskOffset);
+      } else {
+        tCheckTemp.delay(intervalTempTSIC + tempTaskOffset);
+      }
+
+      if (executionTime < 10000 && tBrew.isEnabled() == false) {
+        DEBUG_print("start TASKS:" );
+        DEBUG_println(millis());
+        tBrew.setInterval(intervalBrew + tempTaskOffset);
+        tBrew.enableDelayed(intervalBrew + tempTaskOffset + 5);
+        tPrintDisplay.setInterval(intervalDisplay + tempTaskOffset);
+        tPrintDisplay.enableDelayed(intervalDisplay + tempTaskOffset + 10);
+        tCheckPressure.setInterval(intervalPressure + tempTaskOffset);
+        tCheckPressure.enableDelayed(intervalPressure + tempTaskOffset + 75);
+        tCheckWeight.setInterval(intervalWeight + tempTaskOffset);
+        tCheckWeight.enableDelayed(intervalWeight + tempTaskOffset + 80);
+        tSendBlynk.setInterval(intervalBlynk + tempTaskOffset);
+        tSendBlynk.enableDelayed(intervalBlynk + tempTaskOffset + 85);
+      }
 
       Temperatur_C = Sensor1.calc_Celsius(&temperature);
       if (!checkSensor(Temperatur_C) && firstreading == 0) return;  //if sensor data is not valid, abort function; Sensor must be read at least one time at system startup
@@ -530,7 +599,7 @@ void refreshTemp() {
         firstreading = 0;
       }
     } else {
-      //DEBUG_println("Temp reading failed!" );
+      DEBUG_println("Temp reading failed!" );
     }
   }
 }
@@ -539,6 +608,20 @@ void refreshTemp() {
     PreInfusion, Brew , if not Only PID
 ******************************************************/
 void brew() {
+  unsigned long startDelay = tBrew.getStartDelay();
+  unsigned long overrun = tBrew.getOverrun();
+  unsigned long executionTime = micros();
+  int weightRate = 0;
+  //DEBUG_print("start brew:" );
+  //DEBUG_println(millis());
+  if (overrun < 0) {
+    DEBUG_print("overrun brew = ");
+    DEBUG_println(overrun);
+  }
+  if (startDelay > 0 ) {
+    DEBUG_print("startdelay brew:" );
+    DEBUG_println(startDelay);
+  }
   if (OnlyPID == 0) {
     unsigned long currentMillistemp = millis();
     brewswitch = digitalRead(pinBrewSwitch);
@@ -547,8 +630,10 @@ void brew() {
       brewcounter = 42;
     }
 
+    // brew running
     if (brewcounter > 10 && brewcounter < 42) {
       bezugsZeit = currentMillistemp - startZeit;
+      weightBrew = weight - weightPreBrew;
     }
 
     totalbrewtime = preinfusion + preinfusionpause + brewtime;    // running every cycle, in case changes are done during brew
@@ -558,12 +643,13 @@ void brew() {
       case 10:    // waiting step for brew switch turning on
         if (brewswitch == HIGH) {
           startZeit = millis();
-          if(preinfusion == 0){
+          if (preinfusion == 0) {
             brewcounter = 40;
           } else {
             brewcounter = 20;
-          }          
+          }
           kaltstart = false;    // force reset kaltstart if shot is pulled
+          weightPreBrew = weight;
         }
         break;
       case 20:    //preinfusioon
@@ -595,7 +681,8 @@ void brew() {
         brewcounter = 41;
         break;
       case 41:    //waiting time brew
-        if (bezugsZeit > totalbrewtime) {
+        //TODO: calc weight changerate, and estimate offset automatically
+        if (bezugsZeit > totalbrewtime || (weightBrew > (weightSetpoint - scaleDelayValue))) {
           brewcounter = 42;
         }
         break;
@@ -605,6 +692,7 @@ void brew() {
         digitalWrite(pinRelayPumpe, relayOFF);
         brewcounter = 43;
         break;
+      //Test einbau, erst pumpe aus dann ventil zu, um druck nicht im System zu fangen?
       case 43:    // waiting for brewswitch off position
         if (brewswitch == LOW) {
           digitalWrite(pinRelayVentil, relayOFF);
@@ -613,91 +701,106 @@ void brew() {
           bezugsZeitAlt = bezugsZeit;
           bezugsZeit = 0;
           brewDetected = 0; //rearm brewdetection
+          weightPreBrew = 0;  // reset weight value
           brewcounter = 10;
         }
+        weightBrew = weight - weightPreBrew;  // always calculate weight to show on display
         break;
     }
   }
+  //DEBUG_print("execution_time_brew: ");
+  //DEBUG_println(micros() - executionTime);
 }
-
 /********************************************************
     send data to display
 ******************************************************/
-void printScreen() {
-  unsigned long startDelay = tPrintScreen.getStartDelay();
-  if (startDelay > 0 ) {
-    //DEBUG_print("startdelay Screen:" );
-    //DEBUG_println(startDelay);
-  }
+void printDisplay() {
+  unsigned long startDelay = tPrintDisplay.getStartDelay();
   unsigned long executionTime = millis();
+  int weightRate = 0;
+  unsigned long overrun = tPrintDisplay.getOverrun();
+  //DEBUG_print("start display:" );
+  //DEBUG_println(millis());
+  if (overrun < 0) {
+    DEBUG_print("overrun display = ");
+    DEBUG_println(overrun);
+  }
+  if (startDelay > 0 ) {
+    DEBUG_print("startdelay Screen:" );
+    DEBUG_println(startDelay);
+  }
   if (!sensorError) {
     u8g2.clearBuffer();
-    u8g2.drawXBMP(0, 0, logo_width, logo_height, logo_bits_u8g2);   //draw temp icon
-    u8g2.setCursor(32, 14);
-    u8g2.print("Ist :  ");
-    u8g2.print(Input, 1);
-    u8g2.print(" ");
-    u8g2.print((char)176);
-    u8g2.print("C");
-    u8g2.setCursor(32, 24);
-    u8g2.print("Soll:  ");
-    u8g2.print(setPoint, 1);
-    u8g2.print(" ");
-    u8g2.print((char)176);
-    u8g2.print("C");
+    //draw outline frame
+    u8g2.drawFrame(0, 0, 128, 64);
 
-    // Draw heat bar
-    u8g2.drawLine(15, 58, 117, 58);
-    u8g2.drawLine(15, 58, 15, 61);
-    u8g2.drawLine(117, 58, 117, 61);
+    // Draw weight progress bar
+    u8g2.drawFrame(15, 58, 102, 4);
+    weightRate = ((weightBrew - weightPreBrew) / weightSetpoint) * 100;
+    if (weightRate < 0) {
+      weightRate = 0;
+    } else if (weightRate > 1) {
+      weightRate = 100;
+    }
+    u8g2.drawLine(16, 59, weightRate + 16, 59);
+    u8g2.drawLine(16, 60, weightRate + 16, 60);
 
-    u8g2.drawLine(16, 59, (Output / 10) + 16, 59);
-    u8g2.drawLine(16, 60, (Output / 10) + 16, 60);
-    u8g2.drawLine(15, 61, 117, 61);
-
-    //draw current temp in icon
-    if (abs(Input - setPoint) < 0.3) {
+    //draw (blinking) temp
+    if (fabs(Input - setPoint) < 0.3) {
       if (isrCounter < 500) {
-        u8g2.drawLine(9, 48, 9, 58 - (Input  / 2));
-        u8g2.drawLine(10, 48, 10, 58 - (Input  / 2));
-        u8g2.drawLine(11, 48, 11, 58 - (Input  / 2));
-        u8g2.drawLine(12, 48, 12, 58 - (Input  / 2));
-        u8g2.drawLine(13, 48, 13, 58 - (Input  / 2));
+        u8g2.setCursor(12, 14);
+        u8g2.setFont(u8g2_font_profont22_tf);
+        u8g2.print(Input, 1);
+        u8g2.setFont(u8g2_font_open_iconic_arrow_2x_t);
+        u8g2.print(char(78));
+        u8g2.setCursor(72, 14);
+        u8g2.setFont(u8g2_font_profont22_tf);
+        u8g2.print(setPoint, 1);
       }
-    } else if (Input > 106) {
-      u8g2.drawLine(9, 48, 9, 5);
-      u8g2.drawLine(10, 48, 10, 4);
-      u8g2.drawLine(11, 48, 11, 3);
-      u8g2.drawLine(12, 48, 12, 4);
-      u8g2.drawLine(13, 48, 13, 5);
     } else {
-      u8g2.drawLine(9, 48, 9, 58 - (Input  / 2));
-      u8g2.drawLine(10, 48, 10, 58 - (Input  / 2));
-      u8g2.drawLine(11, 48, 11, 58 - (Input  / 2));
-      u8g2.drawLine(12, 48, 12, 58 - (Input  / 2));
-      u8g2.drawLine(13, 48, 13, 58 - (Input  / 2));
+      u8g2.setCursor(12, 14);
+      u8g2.setFont(u8g2_font_profont22_tf);
+      u8g2.print(Input, 1);
+      u8g2.setFont(u8g2_font_open_iconic_arrow_2x_t);
+      u8g2.print(char(78));
+      u8g2.setCursor(72, 14);
+      u8g2.setFont(u8g2_font_profont22_tf);
+      u8g2.print(setPoint, 1);
     }
 
-    //draw setPoint line
-    u8g2.drawLine(18, 58 - (setPoint / 2), 23, 58 - (setPoint / 2));
-
-    // PID Werte ueber heatbar
-    u8g2.setCursor(40, 48);
-    /* test druck deaktivierung
-      u8g2.print(bPID.GetKp(), 0); // P
-      u8g2.print("|");
-      if (bPID.GetKi() != 0) {
-      u8g2.print(bPID.GetKp() / bPID.GetKi(), 0);;
-      } // I
-      else
-      {
-      u8g2.print("0");
-      }
-      u8g2.print("|");
-      u8g2.print(bPID.GetKd() / bPID.GetKp(), 0); // D
-    */
+    u8g2.setCursor(24, 30);
+    //u8g2.setFont(u8g2_font_courR08_tr);
+    //u8g2.setFont(u8g2_font_6x12_tf);
+    u8g2.setFont(u8g2_font_profont10_tf);
+    u8g2.print("W: ");
+    if ( brewswitch == LOW) {
+      u8g2.print(weight, 0);
+    } else {
+      u8g2.print(weightBrew, 0);
+    }
+    u8g2.print("/");
+    u8g2.print(weightSetpoint, 0);
+    u8g2.print(" (");
+    u8g2.print(weightBrew, 1);
+    u8g2.print(")");
+    u8g2.setCursor(24, 38);
+    u8g2.print("T: ");
+    u8g2.print(bezugsZeit / 1000, 1);
+    u8g2.print("/");
+    if (ONLYPID == 1) {
+      u8g2.print(brewtimersoftware, 0);             // deaktivieren wenn Preinfusion ( // voransetzen )
+    }
+    else
+    {
+      u8g2.print(totalbrewtime / 1000, 0);            // aktivieren wenn Preinfusion
+    }
+    u8g2.print(" (");
+    u8g2.print(float(bezugsZeitAlt / 100) / 10, 1);
+    u8g2.print(")");
+    u8g2.setCursor(24, 46);
     u8g2.print("P: ");
     u8g2.print(inputPressure);
+
     u8g2.setCursor(98, 48);
     if (pidMode == 1) {
       if (Output < 99) {
@@ -723,23 +826,7 @@ void printScreen() {
     }
 
 
-    // Brew
-    u8g2.setCursor(32, 34);
-    u8g2.print("Brew:  ");
-    u8g2.print(bezugsZeit / 1000, 1);
-    u8g2.print("/");
-    if (ONLYPID == 1) {
-      u8g2.print(brewtimersoftware, 0);             // deaktivieren wenn Preinfusion ( // voransetzen )
-    }
-    else
-    {
-      u8g2.print(totalbrewtime / 1000, 0);            // aktivieren wenn Preinfusion
-    }
-    u8g2.print("(");
-    u8g2.print(bezugsZeitAlt / 1000, 1);
-    u8g2.print(")");
-    //draw box
-    u8g2.drawFrame(0, 0, 128, 64);
+
 
     // Für Statusinfos
     u8g2.drawFrame(32, 0, 84, 12);
@@ -771,7 +858,6 @@ void printScreen() {
   }
   //DEBUG_print("execution_time_screen: ");
   //DEBUG_println(millis() - executionTime);
-  //DEBUG_println("-------------");
 }
 
 /********************************************************
@@ -780,36 +866,43 @@ void printScreen() {
 void sendToBlynk() {
   if (Offlinemodus == 1) return;
   unsigned long startDelay = tSendBlynk.getStartDelay();
+  unsigned long overrun = tSendBlynk.getOverrun();
+  //DEBUG_print("start blynk:" );
+  //DEBUG_println(millis());
+  if (overrun < 0) {
+    DEBUG_print("overrun blynk = ");
+    DEBUG_println(overrun);
+  }
   if (startDelay > 0 ) {
-    //DEBUG_print("startdelay Blynk:" );
-    //DEBUG_println(startDelay);
+    DEBUG_print("startdelay Blynk:" );
+    DEBUG_println(startDelay);
   }
   unsigned long executionTime = millis();
   if (Blynk.connected()) {
-    if (blynksendcounter == 1) {
+    if (blynkSendCounter == 1) {
       Blynk.virtualWrite(V2, Input);
     }
-    if (blynksendcounter == 2) {
+    if (blynkSendCounter == 2) {
       Blynk.virtualWrite(V23, Output);
     }
-    if (blynksendcounter == 3) {
+    if (blynkSendCounter == 3) {
       Blynk.virtualWrite(V3, setPoint);
     }
-    if (blynksendcounter == 4) {
+    if (blynkSendCounter == 4) {
       Blynk.virtualWrite(V35, heatrateaverage);
     }
-    if (blynksendcounter == 5) {
+    if (blynkSendCounter == 5) {
       Blynk.virtualWrite(V36, heatrateaveragemin);
     }
-    if (grafana == 1 && blynksendcounter >= 6) {
+    if (grafana == 1 && blynkSendCounter >= 6) {
       Blynk.virtualWrite(V60, Input, Output, bPID.GetKp(), bPID.GetKi(), WiFi.RSSI(), setPoint );
-      blynksendcounter = 0;
-    } else if (grafana == 0 && blynksendcounter >= 5) {
-      blynksendcounter = 0;
+      blynkSendCounter = 0;
+    } else if (grafana == 0 && blynkSendCounter >= 5) {
+      blynkSendCounter = 0;
     }
-    blynksendcounter++;
+    blynkSendCounter++;
   }
-  // DEBUG_print("execution_time_blynk: ");
+  //DEBUG_print("execution_time_blynk: ");
   //DEBUG_println(millis() - executionTime);
   //DEBUG_println("-------------");
 }
@@ -854,6 +947,87 @@ void getSignalStrength() {
     bars = 0;
   }
 }
+
+void setPIDparameter() {
+
+  //Sicherheitsabfrage
+  if (sensorError || emergencyStop || Input <= 0) {
+    return;
+  }
+
+  //Set PID if first start of machine detected
+  if (Input < (setPoint - 0.1) && kaltstart) {
+    if (startTn != 0) {
+      startKi = startKp / startTn;
+    } else {
+      startKi = 0 ;
+    }
+    bPID.SetTunings(startKp, startKi, 0, P_ON_M);
+  } else if (timerBrewdetection == 0) {    //Prevent overwriting of brewdetection values
+    // calc ki, kd
+    if (aggTn != 0) {
+      aggKi = aggKp / aggTn ;
+    } else {
+      aggKi = 0 ;
+    }
+    aggKd = aggTv * aggKp ;
+    bPID.SetTunings(aggKp, aggKi, aggKd, PonE);
+    kaltstart = false;
+    if ( millis() - timeBrewdetection  < brewtimersoftware * 1000 && timerBrewdetection == 1) {
+      // calc ki, kd
+      if (aggbTn != 0) {
+        aggbKi = aggbKp / aggbTn ;
+      } else {
+        aggbKi = 0 ;
+      }
+      aggbKd = aggbTv * aggbKp ;
+      bPID.SetTunings(aggbKp, aggbKi, aggbKd) ;
+      if (OnlyPID == 1) {
+        bezugsZeit = millis() - timeBrewdetection ;
+      }
+    }
+
+    if ( millis() - timeBrewdetection  < brewtimersoftware * 1000 && timerBrewdetection == 1) {
+      // calc ki, kd
+      if (aggbTn != 0) {
+        aggbKi = aggbKp / aggbTn ;
+      } else {
+        aggbKi = 0 ;
+      }
+      aggbKd = aggbTv * aggbKp ;
+      bPID.SetTunings(aggbKp, aggbKi, aggbKd) ;
+      if (OnlyPID == 1) {
+        bezugsZeit = millis() - timeBrewdetection ;
+      }
+    }
+
+  }
+}
+
+void setPIDmode() {
+
+  if (emergencyStop || sensorError) {
+    //Deactivate PID
+    if (pidMode == 1) {
+      pidMode = 0;
+      bPID.SetMode(pidMode);
+      Output = 0 ;
+    }
+    digitalWrite(pinRelayHeater, LOW); //Stop heating
+    return;   //abort function
+  }
+
+  //check if PID should run or not. If not, set to manuel and force output to zero
+  if (pidON == 0 && pidMode == 1) {
+    pidMode = 0;
+    bPID.SetMode(pidMode);
+    Output = 0 ;
+  } else if (pidON == 1 && pidMode == 0) {
+    pidMode = 1;
+    bPID.SetMode(pidMode);
+  }
+}
+
 
 /********************************************************
     Timer 1 - ISR for PID calculation and heat realay output
@@ -942,7 +1116,7 @@ void initWiFi() {
   DEBUG_println(F("done"));
   DEBUG_print(F("INIT: Connecting WiFi to: "));
   DEBUG_print(ssid);
-  DEBUG_println("...");
+  DEBUG_print("...");
   // wait up to 20 seconds for connection:
   while ((WiFi.status() != WL_CONNECTED) && (millis() - started < 20000))
   {
@@ -967,10 +1141,10 @@ void initBlynk() {
     Blynk.config(auth, blynkaddress, blynkport) ;
     Blynk.connect(20000);   //try blynk connection
     if (Blynk.connected()) {
-      DEBUG_print(F("done"));
+      DEBUG_println(F("done"));
       Blynk.syncAll();
     } else {
-      DEBUG_print(F("failed"));
+      DEBUG_println(F("failed"));
     }
   }
 }
@@ -987,7 +1161,7 @@ void initOTA() {
   if (Offlinemodus == 1) {
     return;
   }
-
+  DEBUG_println(F("INIT: Initializing OTA..."));
   if (WiFi.status() == WL_CONNECTED) {
     ArduinoOTA.setHostname(OTAhost);  //  Device name for OTA
     ArduinoOTA.setPassword(OTApass);  //  Password for OTA
@@ -1025,7 +1199,7 @@ void initOTA() {
       timer1_enable(TIM_DIV16, TIM_EDGE, TIM_SINGLE); // Enable Timer1 interrupts
     });
     ArduinoOTA.begin();
-    DEBUG_print(F("OTA Ready, "));
+    DEBUG_print(F("done, "));
     DEBUG_print(F("IP address: "));
     DEBUG_println(WiFi.localIP());
   } else {
@@ -1103,16 +1277,32 @@ void initRemoteDebug() {
 }
 
 /********************************************************
-   Initialize crash monitor
+   Initialize scale
 ******************************************************/
-void initCrashMonitor() {
-  /*
-    DEBUG_print(F("INIT: Initializing crash monitor... "));
-    ESPCrashMonitor.disableWatchdog();
-    DEBUG_println(F("DONE"));
-    ESPCrashMonitor.dump(Serial);
-    delay(100);
-  */
+void initScale() {
+  LoadCell.begin();
+  long stabilizingtime = 2000; // tare preciscion can be improved by adding a few seconds of stabilizing time
+  boolean _tare = true; //set this to false if you don't want tare to be performed in the next step
+  DEBUG_print(F("INIT: Initializing scale ... "));
+  u8g2.clearBuffer();
+  u8g2.drawStr(0, 2, "Taring scale,");
+  u8g2.drawStr(0, 12, "remove any load!");
+  u8g2.drawStr(0, 22, "....");
+  u8g2.sendBuffer();
+  LoadCell.start(stabilizingtime, _tare);
+  if (LoadCell.getTareTimeoutFlag()) {
+    DEBUG_println(F("Timeout, check MCU>HX711 wiring and pin designations"));
+    u8g2.drawStr(0, 32, "failed!");
+    u8g2.drawStr(0, 42, "Scale not working...");    // scale timeout will most likely trigger after OTA update, but will still work after boot
+    delay(5000);
+    u8g2.sendBuffer();
+  }
+  else {
+    DEBUG_println(F("done"));
+    u8g2.drawStr(0, 32, "done.");
+    u8g2.sendBuffer();
+  }
+  LoadCell.setCalFactor(calibrationValue); // set calibration factor (float)
 }
 
 /********************************************************
@@ -1120,48 +1310,40 @@ void initCrashMonitor() {
 ******************************************************/
 void initTaskScheduler() {
   DEBUG_print(F("INFO: Starting task scheduler..."));
-  tBrew.setId(40);
-
   lpr.setHighPriorityScheduler(&hpr);
-
-  //lpr.enableAll(true); // this will recursively enable the higher priority tasks as well
-  tCheckTemp.enable();
-  tCheckPressure.enableDelayed();
-  //tCheckWeight.enableDelayed();
-  tSendBlynk.enableDelayed(20);
-  tPrintScreen.enableDelayed(80);
-
-  tBrew.enableDelayed();
-
+  //tCheckTemp.enable();
+  //tBrew.enableDelayed(10);
+  //tCheckPressure.enableDelayed(20);
+  //tCheckWeight.enableDelayed(30);
+  //tSendBlynk.enableDelayed(40);
+  //tPrintDisplay.enableDelayed(50);
   DEBUG_println(F("done"));
+  tCheckTemp.enable();
+  /*
+    tBrew.enableDelayed(intervalBrew + 10);
+    tCheckPressure.enableDelayed(intervalPressure + 20);
+    tCheckWeight.enableDelayed(intervalWeight + 30);
+    tSendBlynk.enableDelayed(intervalBlynk + 40);
+    tPrintDisplay.enableDelayed(intervalDisplay + 50);
+  */
 }
 
 void setup() {
   initSerial();
-  //initCrashMonitor();
   initRemoteDebug();
   defineTriggerType();
   initPins();
   initU8G2();
   initTempSensor();
+  initScale();    // must be called after U8G2!
   initWiFi();
   initBlynk();
   initOTA();
   initPID();
   initTaskScheduler();
-
-  //Initialisation MUST be at the very end of the init(), otherwise the time comparision in loop() will have a big offset
-  unsigned long currentTime = millis();
-  previousMillistemp = currentTime;
-  windowStartTime = currentTime;
-  previousMillisDisplay = currentTime;
-  previousMillisBlynk = currentTime;
-
   initTimer1ISR();
-
   setupDone = true;
   DEBUG_println(F("INIT: Boot sequence complete."));
-  //ESPCrashMonitor.enableWatchdog(ESPCrashMonitorClass::ETimeout::Timeout_2s);
 }
 
 void loop() {
@@ -1180,17 +1362,11 @@ void loop() {
   }
   Debug.handle(); // RemoteDebug handle
   lpr.execute();    // run task scheduler
-  //ESPCrashMonitor.iAmAlive();  // Signal that we are alive first to get the full timeout period.
 
-  //check if PID should run or not. If not, set to manuel and force output to zero
-  if (pidON == 0 && pidMode == 1) {
-    pidMode = 0;
-    bPID.SetMode(pidMode);
-    Output = 0 ;
-  } else if (pidON == 1 && pidMode == 0) {
-    pidMode = 1;
-    bPID.SetMode(pidMode);
-  }
 
+  // TO BE CHECKED!!!
+  setPIDmode();   //set pidMode
+  setPIDparameter(); // set pid parameter
+  testEmergencyStop();
 
 }
