@@ -23,6 +23,22 @@
 #define MACHINELOGO 1        // 1 = Rancilio, 2 = Gaggia
 #define DELAYHEATING 1       // 1 = delay heating until shot has been pulled, 0 = disable delay
 
+// FeedForwardControl
+#define FEEDFORWARDCONTROL 0 // 1 = activate Ffwd control; based on gradient of temperature profile and normal brew or empty brew detection
+#define BREWFLOWRATE 1.10       // flowrate (ml/s) if normal shot is pulled
+#define EMPTYBREWFLOWRATE 9.666  // flowrate (ml/s) if empty shot is pulled; tested 290g/30s @ cold machine
+#define BREWBOARDER_1 150    // boarder to detect normal shot
+#define BREWBOARDER_2 300    // boarder to detect empty shot
+#define HEATINGPOWER 1000    // in Watt
+#define STABILISINGTIME 60000     // waiting time (ms) to give the boiler time for temp stabilisation after brew detection
+#define EMPTYCORRECTIONFACTOR  1.25     //factor to correct Q calculation
+#define NORMALCORRECTIONFACTOR  1.35     //factor to correct Q calculation
+
+//backflush values
+#define FILLTIME 3000       // time in ms the pump is running
+#define FLUSHTIME 6000      // time in ms the 3-way valve is open -> backflush
+#define MAXFLUSHCYCLES 5      // number of cycles the backflush should run; 0 = disabled
+
 // Wifi
 #define AUTH "blynkauthcode"
 #define D_SSID "wlanname"
