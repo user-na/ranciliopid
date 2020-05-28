@@ -907,6 +907,38 @@ void sendToBlynk() {
   //DEBUG_println("-------------");
 }
 
+void brewdetection() {
+  if (brewboarder == 0) return; //abort brewdetection if deactivated
+
+  // Brew detecion == 1 software solution , == 2 hardware
+  if (Brewdetection == 1) {
+    if (millis() - timeBrewdetection > brewtimersoftware * 1000) {
+      timerBrewdetection = 0 ;    //rearm brewdetection
+      if (OnlyPID == 1) {
+        bezugsZeit = 0 ;    // brewdetection is used in OnlyPID mode to detect a start of brew, and set the bezugsZeit
+      }
+    }
+  } else if (Brewdetection == 2) {
+    if (millis() - timeBrewdetection > brewtimersoftware * 1000) {
+      timerBrewdetection = 0 ;  //rearm brewdetection
+    }
+  }
+
+  if (Brewdetection == 1) {
+    if (heatrateaverage <= -brewboarder && timerBrewdetection == 0 ) {
+      DEBUG_println("SW Brew detected") ;
+      timeBrewdetection = millis() ;
+      timerBrewdetection = 1 ;
+    }
+  } else if (Brewdetection == 2) {
+    if (brewcounter > 10 && brewDetected == 0) {
+      DEBUG_println("HW Brew detected") ;
+      timeBrewdetection = millis() ;
+      timerBrewdetection = 1 ;
+      brewDetected = 1;
+    }
+  }
+}
 
 /********************************************************
   after ~28 cycles the input is set to 99,66% if the real input value
@@ -1368,5 +1400,6 @@ void loop() {
   setPIDmode();   //set pidMode
   setPIDparameter(); // set pid parameter
   testEmergencyStop();
-
+  brewdetection();    // only for testing here!!!
+   
 }
