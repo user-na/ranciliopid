@@ -1,6 +1,6 @@
 /********************************************************
-  Version 2.0 (08.02.2021) 
-  Last Change: E-Trigger Siliva E
+  Version 2.1 (20.02.2021) 
+  Last Change: implement scale functionality
   Config must be configured by the user
 ******************************************************/
 
@@ -63,8 +63,9 @@
 #define BLYNKADDRESS "blynk.clevercoffee.de"         // IP-Address of used blynk server
 #define BLYNKPORT 8080  //Port for blynk server
 
-
-
+// scale
+#define ENABLESCALE 1  // 1 = weight scale enabled
+#define WEIGHTSETPOINT 30
 
 //PID - offline values
 #define SETPOINT 95  // Temperatur setpoint
@@ -93,6 +94,8 @@
 #define pinRelayVentil    12    //Output pin for 3-way-valve
 #define pinRelayPumpe     13    //Output pin for pump
 #define pinRelayHeater    14    //Output pin for heater
+#define hxDAT         16        // Input pin to receive data from HX711   GPIO0 = D3
+#define hxCLK         0         // Output pin for Clock to HX711   GPIO16 = D0
 
 //#define OLED_RESET 16     //Output pin for dispaly reset pin
 #define OLED_SCL 5        //Output pin for dispaly clock pin
