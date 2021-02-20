@@ -1,6 +1,6 @@
 /********************************************************
-   Version 2.7.1 (10.02.2021) 
-   * New Displaytemplates 
+   Version 2.7.2 beta (20.02.2021) 
+   * implement scale functionality
 ******************************************************/
 
 /********************************************************
@@ -16,6 +16,9 @@
 #include "icon.h"   //user icons for display
 #include <ZACwire.h> //NEW TSIC LIB
 #include <PubSubClient.h>
+#if ENABLESCALE == 1
+  #include <HX711_ADC.h>
+#endif
 
 /********************************************************
   DEFINES
@@ -52,6 +55,11 @@ const unsigned long wifiConnectionDelay = WIFICINNECTIONDELAY;
 const unsigned int maxWifiReconnects = MAXWIFIRECONNECTS;
 int machineLogo = MACHINELOGO;
 const unsigned long brewswitchDelay = BREWSWITCHDELAY;
+
+//scale
+#if ENABLESCALE == 1
+float weightSetpoint = WEIGHTSETPOINT;
+#endif
 
 // Wifi
 const char* hostname = HOSTNAME;
@@ -98,7 +106,7 @@ int pidON = 1 ;                 // 1 = control loop in closed loop
 int relayON, relayOFF;          // used for relay trigger type. Do not change!
 boolean kaltstart = true;       // true = Rancilio started for first time
 boolean emergencyStop = false;  // Notstop bei zu hoher Temperatur
-const char* sysVersion PROGMEM  = "Version 2.7.1 MASTER";   //System version
+const char* sysVersion PROGMEM  = "Version 2.7.2 BETA";   //System version
 int inX = 0, inY = 0, inOld = 0, inSum = 0; //used for filter()
 int bars = 0; //used for getSignalStrength()
 boolean brewDetected = 0;
@@ -214,6 +222,21 @@ uint16_t temperature = 0;     // internal variable used to read temeprature
 float Temperatur_C = 0;       // internal variable that holds the converted temperature in °C
 
 ZACwire<ONE_WIRE_BUS> Sensor2(306);    // set pin "2" to receive signal from the TSic "306"
+
+
+/********************************************************
+   HX711 load cell (scale)
+******************************************************/
+#if ENABLESCALE == 1
+float calibrationValue = 3195.83; // use calibration example to get value
+float weight = 0;   // value from HX711
+float weightPreBrew = 0;  // value of scale before wrew started
+float weightBrew = 0;  // weight value of brew
+float scaleDelayValue = 9;  //value in gramm that takes still flows onto the scale after brew is stopped
+const unsigned long intervalWeight = 200;   // weight scale
+unsigned long previousMillisScale;  // initialisation at the end of init()
+HX711_ADC LoadCell(hxDAT, hxCLK);
+#endif
 
 
 /********************************************************
@@ -335,6 +358,12 @@ BLYNK_WRITE(V13)
   pidON = param.asInt();
   mqtt_publish("pidON", number2string(pidON));
 }
+#if ENABLESCALE == 1
+BLYNK_WRITE(V15)
+{
+  weightSetpoint = param.asFloat();
+}
+#endif
 BLYNK_WRITE(V30)
 {
   aggbKp = param.asDouble();//
@@ -453,7 +482,56 @@ void backflush() {
   }
 }
 
+#if ENABLESCALE == 1
+void checkWeight() {
+  static boolean newDataReady = 0;
+  unsigned long currentMillisScale = millis();
+     if (currentMillisScale - previousMillisScale >= intervalWeight)
+    {
+      previousMillisScale = currentMillisScale;
+    
+      // check for new data/start next conversion:
+  if (LoadCell.update()) {
+    newDataReady = true;
+  }
 
+  // get smoothed value from the dataset:
+  if (newDataReady) {
+    weight = LoadCell.getData();
+    newDataReady = 0;
+  }
+    }  
+}
+
+/********************************************************
+   Initialize scale
+******************************************************/
+void initScale() {
+  LoadCell.begin();
+  long stabilizingtime = 2000; // tare preciscion can be improved by adding a few seconds of stabilizing time
+  boolean _tare = true; //set this to false if you don't want tare to be performed in the next step
+  DEBUG_print(F("INIT: Initializing scale ... "));
+  u8g2.clearBuffer();
+  u8g2.drawStr(0, 2, "Taring scale,");
+  u8g2.drawStr(0, 12, "remove any load!");
+  u8g2.drawStr(0, 22, "....");
+  u8g2.sendBuffer();
+  LoadCell.start(stabilizingtime, _tare);
+  if (LoadCell.getTareTimeoutFlag()) {
+    DEBUG_println(F("Timeout, check MCU>HX711 wiring and pin designations"));
+    u8g2.drawStr(0, 32, "failed!");
+    u8g2.drawStr(0, 42, "Scale not working...");    // scale timeout will most likely trigger after OTA update, but will still work after boot
+    delay(5000);
+    u8g2.sendBuffer();
+  }
+  else {
+    DEBUG_println(F("done"));
+    u8g2.drawStr(0, 32, "done.");
+    u8g2.sendBuffer();
+  }
+  LoadCell.setCalFactor(calibrationValue); // set calibration factor (float)
+}
+#endif
 
 /********************************************************
   Read analog input pin
@@ -599,6 +677,9 @@ void brew()
 
     if (brewcounter > 10) {
       bezugsZeit = currentMillistemp - startZeit;
+    #if ENABLESCALE == 1
+    weightBrew = weight - weightPreBrew;
+    #endif
     }
     if (brewswitch < 1000 && firstreading == 0 ) 
     {   //check if brewswitch was turned off at least once, last time,
@@ -649,9 +730,15 @@ void brew()
         brewcounter = 41;
         break;
       case 41:    //waiting time brew
-        if (bezugsZeit > totalbrewtime) {
+    #if ENABLESCALE == 1
+    if (bezugsZeit > totalbrewtime || (weightBrew > (weightSetpoint - scaleDelayValue))) {
           brewcounter = 42;
         }
+    #else
+            if (bezugsZeit > totalbrewtime) {
+          brewcounter = 42;
+        }
+    #endif
         break;
       case 42:    //brew finished
         DEBUG_println("Brew stopped");
@@ -669,6 +756,9 @@ void brew()
           brewDetected = 0; //rearm brewdetection
           brewcounter = 10;
         }
+    #if ENABLESCALE == 1
+      weightBrew = weight - weightPreBrew;  // always calculate weight to show on display
+    #endif
         break;
     }
   }
@@ -1120,6 +1210,10 @@ void setup() {
     displayLogo(sysVersion, "");
     delay(2000);
   #endif
+  
+  #if ENABLESCALE == 1
+  initScale();    // must be called after U8G2!
+  #endif
 
   /********************************************************
      BLYNK & Fallback offline
@@ -1312,6 +1406,9 @@ void setup() {
   previousMillisDisplay = currentTime;
   previousMillisBlynk = currentTime;
   previousMillisETrigger = currentTime; 
+  #if ENABLESCALE == 1
+  previousMillisScale = currentTime;
+  #endif
 
   /********************************************************
     Timer1 ISR - Initialisierung
@@ -1373,6 +1470,9 @@ void loop() {
   refreshTemp();   //read new temperature values
   testEmergencyStop();  // test if Temp is to high
   brew();   //start brewing if button pressed
+  #if ENABLESCALE == 1
+  checkWeight();
+  #endif
 
   sendToBlynk();
    if(ETRIGGER == 1) // E-Trigger active then void Etrigger() 
