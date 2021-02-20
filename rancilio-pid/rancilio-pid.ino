@@ -1,6 +1,6 @@
 /********************************************************
-   Version 2.7.2 beta (20.02.2021) 
-   * implement scale functionality
+   Version 2.7.2 beta (20.02.2021)
+     implement scale functionality
 ******************************************************/
 
 /********************************************************
@@ -17,7 +17,7 @@
 #include <ZACwire.h> //NEW TSIC LIB
 #include <PubSubClient.h>
 #if ENABLESCALE == 1
-  #include <HX711_ADC.h>
+#include <HX711_ADC.h>
 #endif
 
 /********************************************************
@@ -161,6 +161,7 @@ double preinfusion = 2000;  //preinfusion time in ms
 double preinfusionpause = 5000;   //preinfusion pause time in ms
 double bezugsZeit = 0;   //total brewed time
 double bezugszeit_last_Millis = 0; // for shottimer delay after disarmed button
+unsigned long bezugsZeitAlt = 0;
 unsigned long startZeit = 0;    //start time of brew
 const unsigned long analogreadingtimeinterval = 10 ; // ms
 unsigned long previousMillistempanalogreading ; // ms for analogreading
@@ -232,7 +233,8 @@ float calibrationValue = 3195.83; // use calibration example to get value
 float weight = 0;   // value from HX711
 float weightPreBrew = 0;  // value of scale before wrew started
 float weightBrew = 0;  // weight value of brew
-float scaleDelayValue = 9;  //value in gramm that takes still flows onto the scale after brew is stopped
+float scaleDelayValue = 2.5;  //value in gramm that takes still flows onto the scale after brew is stopped
+bool scaleFailure = false;
 const unsigned long intervalWeight = 200;   // weight scale
 unsigned long previousMillisScale;  // initialisation at the end of init()
 HX711_ADC LoadCell(hxDAT, hxCLK);
@@ -280,10 +282,10 @@ void getSignalStrength() {
 ******************************************************/
 //DISPLAY constructor, change if needed
 #if  DISPLAY == 1
-    U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);   //e.g. 1.3"
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);   //e.g. 1.3"
 #endif
 #if DISPLAY == 2
-    U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);    //e.g. 0.96"
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);    //e.g. 0.96"
 #endif
 //Update für Display
 unsigned long previousMillisDisplay;  // initialisation at the end of init()
@@ -291,24 +293,27 @@ const unsigned long intervalDisplay = 500;
 
 //Standard Display or vertikal?
 #if (DISPLAY == 1 || DISPLAY == 2) // Display is used 
-  #if (DISPLAYTEMPLATE < 20) // normal templates
-    #include "display.h"  
-  #endif  
-  #if (DISPLAYTEMPLATE >= 20) // vertical templates 
-    #include "Displayrotateupright.h"  
-  #endif  
-  #if (DISPLAYTEMPLATE == 1)
-      #include "Displaytemplatestandard.h"
-  #endif    
-  #if (DISPLAYTEMPLATE == 2)
-      #include "Displaytemplateminimal.h"
-  #endif    
-  #if (DISPLAYTEMPLATE == 3)
-      #include "Displaytemplatetemponly.h"
-  #endif   
-  #if (DISPLAYTEMPLATE == 20)
-      #include "Displaytemplateupright.h"
-  #endif   
+#if (DISPLAYTEMPLATE < 20) // normal templates
+#include "display.h"
+#endif
+#if (DISPLAYTEMPLATE >= 20) // vertical templates 
+#include "Displayrotateupright.h"
+#endif
+#if (DISPLAYTEMPLATE == 1)
+#include "Displaytemplatestandard.h"
+#endif
+#if (DISPLAYTEMPLATE == 2)
+#include "Displaytemplateminimal.h"
+#endif
+#if (DISPLAYTEMPLATE == 3)
+#include "Displaytemplatetemponly.h"
+#endif
+#if (DISPLAYTEMPLATE == 4)
+#include "Displaytemplatescale.h"
+#endif
+#if (DISPLAYTEMPLATE == 20)
+#include "Displaytemplateupright.h"
+#endif
 #endif
 
 
@@ -341,17 +346,17 @@ BLYNK_WRITE(V7) {
 
 BLYNK_WRITE(V8) {
   brewtime = param.asDouble() * 1000;
-  mqtt_publish("brewtime", number2string(brewtime/1000));
+  mqtt_publish("brewtime", number2string(brewtime / 1000));
 }
 
 BLYNK_WRITE(V9) {
   preinfusion = param.asDouble() * 1000;
-  mqtt_publish("preinfusion", number2string(preinfusion/1000));
+  mqtt_publish("preinfusion", number2string(preinfusion / 1000));
 }
 
 BLYNK_WRITE(V10) {
   preinfusionpause = param.asDouble() * 1000;
-  mqtt_publish("preinfusionpause", number2string(preinfusionpause/1000));
+  mqtt_publish("preinfusionpause", number2string(preinfusionpause / 1000));
 }
 BLYNK_WRITE(V13)
 {
@@ -386,21 +391,21 @@ BLYNK_WRITE(V40) {
 }
 
 #if (COLDSTART_PID == 2)  // 2=?Blynk values, else default starttemp from config
-  BLYNK_WRITE(V11) 
-    {
-    startKp = param.asDouble();
-    }
-  BLYNK_WRITE(V14)
-    {
-      startTn = param.asDouble();
-    }
- #endif
+BLYNK_WRITE(V11)
+{
+  startKp = param.asDouble();
+}
+BLYNK_WRITE(V14)
+{
+  startTn = param.asDouble();
+}
+#endif
 /********************************************************
   Trigger for Rancilio E Machine
 ******************************************************/
 unsigned long previousMillisETrigger ;  // initialisation at the end of init()
 const unsigned long intervalETrigger = ETRIGGERTIME ; // in Seconds
-int relayETriggerON, relayETriggerOFF;    
+int relayETriggerON, relayETriggerOFF;
 /********************************************************
   Emergency stop inf temp is to high
 *****************************************************/
@@ -486,21 +491,24 @@ void backflush() {
 void checkWeight() {
   static boolean newDataReady = 0;
   unsigned long currentMillisScale = millis();
-     if (currentMillisScale - previousMillisScale >= intervalWeight)
-    {
-      previousMillisScale = currentMillisScale;
-    
-      // check for new data/start next conversion:
-  if (LoadCell.update()) {
-    newDataReady = true;
+  if (scaleFailure) {   // abort if scale is not working
+    return;
   }
+  if (currentMillisScale - previousMillisScale >= intervalWeight)
+  {
+    previousMillisScale = currentMillisScale;
 
-  // get smoothed value from the dataset:
-  if (newDataReady) {
-    weight = LoadCell.getData();
-    newDataReady = 0;
+    // check for new data/start next conversion:
+    if (LoadCell.update()) {
+      newDataReady = true;
+    }
+
+    // get smoothed value from the dataset:
+    if (newDataReady) {
+      weight = LoadCell.getData();
+      newDataReady = 0;
+    }
   }
-    }  
 }
 
 /********************************************************
@@ -662,9 +670,9 @@ void refreshTemp() {
 /********************************************************
     PreInfusion, Brew , if not Only PID
 ******************************************************/
-void brew() 
+void brew()
 {
-  if (OnlyPID == 0) 
+  if (OnlyPID == 0)
   {
     readAnalogInput();
     unsigned long currentMillistemp = millis();
@@ -677,12 +685,12 @@ void brew()
 
     if (brewcounter > 10) {
       bezugsZeit = currentMillistemp - startZeit;
-    #if ENABLESCALE == 1
-    weightBrew = weight - weightPreBrew;
-    #endif
+#if ENABLESCALE == 1
+      weightBrew = weight - weightPreBrew;
+#endif
     }
-    if (brewswitch < 1000 && firstreading == 0 ) 
-    {   //check if brewswitch was turned off at least once, last time,
+    if (brewswitch < 1000 && firstreading == 0 )
+    { //check if brewswitch was turned off at least once, last time,
       brewswitchWasOFF = true;
       //DEBUG_println("brewswitch value")
       //DEBUG_println(brewswitch)
@@ -730,15 +738,15 @@ void brew()
         brewcounter = 41;
         break;
       case 41:    //waiting time brew
-    #if ENABLESCALE == 1
-    if (bezugsZeit > totalbrewtime || (weightBrew > (weightSetpoint - scaleDelayValue))) {
+#if ENABLESCALE == 1
+        if (bezugsZeit > totalbrewtime || (weightBrew > (weightSetpoint - scaleDelayValue))) {
           brewcounter = 42;
         }
-    #else
-            if (bezugsZeit > totalbrewtime) {
+#else
+        if (bezugsZeit > totalbrewtime) {
           brewcounter = 42;
         }
-    #endif
+#endif
         break;
       case 42:    //brew finished
         DEBUG_println("Brew stopped");
@@ -751,14 +759,15 @@ void brew()
           digitalWrite(pinRelayVentil, relayOFF);
           digitalWrite(pinRelayPumpe, relayOFF);
           bezugszeit_last_Millis = millis();  // for shottimer delay after disarmed button
+          bezugsZeitAlt = bezugsZeit;
           currentMillistemp = 0;
           bezugsZeit = 0;
           brewDetected = 0; //rearm brewdetection
           brewcounter = 10;
         }
-    #if ENABLESCALE == 1
-      weightBrew = weight - weightPreBrew;  // always calculate weight to show on display
-    #endif
+#if ENABLESCALE == 1
+        weightBrew = weight - weightPreBrew;  // always calculate weight to show on display
+#endif
         break;
     }
   }
@@ -768,11 +777,11 @@ void brew()
   Switch to offline modeif maxWifiReconnects were exceeded
   during boot
 *****************************************************/
-void initOfflineMode() 
+void initOfflineMode()
 {
-  #if DISPLAY != 0
-    displayMessage("", "", "", "", "Begin Fallback,", "No Wifi");
-  #endif
+#if DISPLAY != 0
+  displayMessage("", "", "", "", "Begin Fallback,", "No Wifi");
+#endif
   DEBUG_println("Start offline mode with eeprom values, no wifi:(");
   Offlinemodus = 1 ;
 
@@ -795,9 +804,9 @@ void initOfflineMode()
     EEPROM.get(120, brewtimersoftware);
     EEPROM.get(130, brewboarder);
   } else {
-    #if DISPLAY != 0
-      displayMessage("", "", "", "", "No eeprom,", "Values");
-     #endif
+#if DISPLAY != 0
+    displayMessage("", "", "", "", "No eeprom,", "Values");
+#endif
     DEBUG_println("No working eeprom value, I am sorry, but use default offline value  :)");
     delay(1000);
   }
@@ -820,9 +829,9 @@ void checkWifi() {
         DEBUG_print("Attempting WIFI reconnection: ");
         DEBUG_println(wifiReconnects);
         if (!setupDone) {
-           #if DISPLAY != 0
-            displayMessage("", "", "", "", "Wifi reconnect:", String(wifiReconnects));
-          #endif
+#if DISPLAY != 0
+          displayMessage("", "", "", "", "Wifi reconnect:", String(wifiReconnects));
+#endif
         }
         WiFi.disconnect();
         WiFi.begin(ssid, pass);   // attempt to connect to Wifi network
@@ -868,7 +877,7 @@ void checkBlynk() {
    abort function if offline, or brew is running
    MQTT is also using maxWifiReconnects!
 *****************************************************/
-void checkMQTT(){
+void checkMQTT() {
   if (Offlinemodus == 1 || brewcounter > 11) return;
   if ((millis() - lastMQTTConnectionAttempt >= wifiConnectionDelay) && (MQTTReCnctCount <= maxWifiReconnects)) {
     int statusTemp = mqtt.connected();
@@ -877,7 +886,7 @@ void checkMQTT(){
       MQTTReCnctCount++;  // Increment reconnection Counter
       DEBUG_print("Attempting MQTT reconnection: ");
       DEBUG_println(MQTTReCnctCount);
-      if (mqtt.connect(hostname, mqtt_username, mqtt_password,topic_will,0,0,"exit") == true);{
+      if (mqtt.connect(hostname, mqtt_username, mqtt_password, topic_will, 0, 0, "exit") == true); {
         mqtt.subscribe(topic_set);
         DEBUG_println("Subscribe to MQTT Topics");
       }  // Try to reconnect to the server; connect() is a blocking function, watch the timeout!
@@ -914,12 +923,12 @@ char* number2string(unsigned int in) {
    Publish Data to MQTT
 *****************************************************/
 bool mqtt_publish(char* reading, char* payload) {
-  if (MQTT == 1){
+  if (MQTT == 1) {
     char topic[120];
     snprintf(topic, 120, "%s%s/%s", mqtt_topic_prefix, hostname, reading);
-    mqtt.publish(topic,payload,true);
+    mqtt.publish(topic, payload, true);
   }
-  }
+}
 
 /********************************************************
   send data to Blynk server
@@ -960,16 +969,16 @@ void sendToBlynk() {
       }
       if (grafana == 1 && blynksendcounter >= 6) {
         Blynk.virtualWrite(V60, Input, Output, bPID.GetKp(), bPID.GetKi(), bPID.GetKd(), setPoint );
-         if (MQTT == 1)
-         {
-            mqtt_publish("HeaterPower", number2string(Output));
-            mqtt_publish("Kp", number2string(bPID.GetKp()));
-            mqtt_publish("Ki", number2string(bPID.GetKi()));
-            mqtt_publish("pidON", number2string(pidON));
-            mqtt_publish("brewtime", number2string(brewtime/1000));
-            mqtt_publish("preinfusionpause", number2string(preinfusionpause/1000));
-            mqtt_publish("preinfusion", number2string(preinfusion/1000));
-         }
+        if (MQTT == 1)
+        {
+          mqtt_publish("HeaterPower", number2string(Output));
+          mqtt_publish("Kp", number2string(bPID.GetKp()));
+          mqtt_publish("Ki", number2string(bPID.GetKi()));
+          mqtt_publish("pidON", number2string(pidON));
+          mqtt_publish("brewtime", number2string(brewtime / 1000));
+          mqtt_publish("preinfusionpause", number2string(preinfusionpause / 1000));
+          mqtt_publish("preinfusion", number2string(preinfusion / 1000));
+        }
         blynksendcounter = 0;
       } else if (grafana == 0 && blynksendcounter >= 5) {
         blynksendcounter = 0;
@@ -1069,7 +1078,7 @@ void mqtt_callback(char* topic, byte* data, unsigned int length) {
   char topic_str[255];
   os_memcpy(topic_str, topic, sizeof(topic_str));
   topic_str[255] = '\0';
-  char data_str[length+1];
+  char data_str[length + 1];
   os_memcpy(data_str, data, length);
   data_str[length] = '\0';
   char topic_pattern[255];
@@ -1080,11 +1089,11 @@ void mqtt_callback(char* topic, byte* data, unsigned int length) {
 
 
 
- // DEBUG_print("mqtt_parse(%s, %s)\n", topic_str, data_str);
+  // DEBUG_print("mqtt_parse(%s, %s)\n", topic_str, data_str);
   snprintf(topic_pattern, sizeof(topic_pattern), "%s%s/%%[^\\/]/%%[^\\/]", mqtt_topic_prefix, hostname);
   DEBUG_println(topic_pattern);
   if ( (sscanf( topic_str, topic_pattern , &configVar, &cmd) != 2) || (strcmp(cmd, "set") != 0) ) {
-  DEBUG_print(topic_str);
+    DEBUG_print(topic_str);
     return;
   }
   DEBUG_println(topic_str);
@@ -1092,34 +1101,44 @@ void mqtt_callback(char* topic, byte* data, unsigned int length) {
   if (strcmp(configVar, "setPoint") == 0) {
     sscanf(data_str, "%lf", &data_double);
     mqtt_publish("setPoint", number2string(setPoint));
-    if (Blynk.connected()) { Blynk.virtualWrite(V7, String(data_double));}
+    if (Blynk.connected()) {
+      Blynk.virtualWrite(V7, String(data_double));
+    }
     setPoint = data_double;
     return;
   }
   if (strcmp(configVar, "brewtime") == 0) {
     sscanf(data_str, "%lf", &data_double);
-    if (Blynk.connected()) { Blynk.virtualWrite(V8, String(data_double));}
-    mqtt_publish("brewtime", number2string(brewtime/1000));
+    if (Blynk.connected()) {
+      Blynk.virtualWrite(V8, String(data_double));
+    }
+    mqtt_publish("brewtime", number2string(brewtime / 1000));
     brewtime = data_double * 1000 ;
     return;
   }
   if (strcmp(configVar, "preinfusion") == 0) {
     sscanf(data_str, "%lf", &data_double);
-    if (Blynk.connected()) { Blynk.virtualWrite(V9, String(data_double));}
-    mqtt_publish("preinfusion", number2string(preinfusion/1000));
+    if (Blynk.connected()) {
+      Blynk.virtualWrite(V9, String(data_double));
+    }
+    mqtt_publish("preinfusion", number2string(preinfusion / 1000));
     preinfusion = data_double * 1000;
     return;
   }
   if (strcmp(configVar, "preinfusionpause") == 0) {
     sscanf(data_str, "%lf", &data_double);
-    if (Blynk.connected()) { Blynk.virtualWrite(V10, String(data_double));}
-    mqtt_publish("preinfusionpause", number2string(preinfusionpause/1000));
+    if (Blynk.connected()) {
+      Blynk.virtualWrite(V10, String(data_double));
+    }
+    mqtt_publish("preinfusionpause", number2string(preinfusionpause / 1000));
     preinfusionpause = data_double * 1000;
     return;
   }
-    if (strcmp(configVar, "pidON") == 0) {
+  if (strcmp(configVar, "pidON") == 0) {
     sscanf(data_str, "%lf", &data_double);
-    if (Blynk.connected())  { Blynk.virtualWrite(V13,String(data_double));}
+    if (Blynk.connected())  {
+      Blynk.virtualWrite(V13, String(data_double));
+    }
     mqtt_publish("pidON", number2string(pidON));
     pidON = data_double ;
     return;
@@ -1131,28 +1150,28 @@ void mqtt_callback(char* topic, byte* data, unsigned int length) {
 *****************************************************/
 //unsigned long previousMillisETrigger ;  // initialisation at the end of init()
 //const unsigned long intervalETrigger = ETriggerTime ; // in Seconds
-void ETriggervoid() 
+void ETriggervoid()
 {
-  //Static variable only one time is 0 
+  //Static variable only one time is 0
   static int ETriggeractive = 0;
   unsigned long currentMillisETrigger = millis();
   if (ETRIGGER == 1) // E Trigger is active from userconfig
-  { 
-    // 
-    if (currentMillisETrigger - previousMillisETrigger >= (1000*intervalETrigger))  //s to ms * 1000
-    {  // check 
+  {
+    //
+    if (currentMillisETrigger - previousMillisETrigger >= (1000 * intervalETrigger)) //s to ms * 1000
+    { // check
       ETriggeractive = 1 ;
       previousMillisETrigger = currentMillisETrigger;
 
       digitalWrite(PINETRIGGER, relayETriggerON);
     }
     // 10 Seconds later
-    else if (ETriggeractive == 1 && previousMillisETrigger+(10*1000) < (currentMillisETrigger))
+    else if (ETriggeractive == 1 && previousMillisETrigger + (10 * 1000) < (currentMillisETrigger))
     {
-    digitalWrite(PINETRIGGER, relayETriggerOFF);
-    ETriggeractive = 0;
+      digitalWrite(PINETRIGGER, relayETriggerOFF);
+      ETriggeractive = 0;
     }
-  } 
+  }
 }
 
 void setup() {
@@ -1196,35 +1215,35 @@ void setup() {
   digitalWrite(pinRelayVentil, relayOFF);
   digitalWrite(pinRelayPumpe, relayOFF);
   digitalWrite(pinRelayHeater, LOW);
-  if (ETRIGGER == 1) 
-  { 
+  if (ETRIGGER == 1)
+  {
     pinMode(PINETRIGGER, OUTPUT);
   }
 
   /********************************************************
     DISPLAY 128x64
   ******************************************************/
-  #if DISPLAY != 0
-    u8g2.begin();
-    u8g2_prepare();
-    displayLogo(sysVersion, "");
-    delay(2000);
-  #endif
-  
-  #if ENABLESCALE == 1
+#if DISPLAY != 0
+  u8g2.begin();
+  u8g2_prepare();
+  displayLogo(sysVersion, "");
+  delay(2000);
+#endif
+
+#if ENABLESCALE == 1
   initScale();    // must be called after U8G2!
-  #endif
+#endif
 
   /********************************************************
      BLYNK & Fallback offline
   ******************************************************/
-  if (Offlinemodus == 0) 
+  if (Offlinemodus == 0)
   {
     WiFi.hostname(hostname);
     unsigned long started = millis();
-    #if DISPLAY != 0
-      displayLogo("1: Connect Wifi to:", ssid);
-    #endif
+#if DISPLAY != 0
+    displayLogo("1: Connect Wifi to:", ssid);
+#endif
     /* Explicitly set the ESP8266 to be a WiFi-client, otherwise, it by default,
       would try to act as both a client and an access-point and could cause
       network-issues with your other WiFi-devices on your WiFi-network. */
@@ -1250,13 +1269,13 @@ void setup() {
       DEBUG_println(WiFi.localIP());
       DEBUG_println("Wifi works, now try Blynk (timeout 30s)");
       if (fallback == 0) {
-        #if DISPLAY != 0
-          displayLogo("Connect to Blynk", "no Fallback");
-        #endif
+#if DISPLAY != 0
+        displayLogo("Connect to Blynk", "no Fallback");
+#endif
       } else if (fallback == 1) {
-        #if DISPLAY != 0
-          displayLogo("2: Wifi connected, ", "try Blynk   ");
-        #endif
+#if DISPLAY != 0
+        displayLogo("2: Wifi connected, ", "try Blynk   ");
+#endif
       }
       delay(1000);
 
@@ -1264,13 +1283,13 @@ void setup() {
       Blynk.config(auth, blynkaddress, blynkport) ;
       Blynk.connect(30000);
 
-      if (Blynk.connected() == true) 
+      if (Blynk.connected() == true)
       {
-        #if DISPLAY != 0
-          displayLogo("3: Blynk connected", "sync all variables...");
-        #endif
+#if DISPLAY != 0
+        displayLogo("3: Blynk connected", "sync all variables...");
+#endif
         DEBUG_println("Blynk is online");
-        if (fallback == 1) 
+        if (fallback == 1)
         {
           DEBUG_println("sync all variables and write new values to eeprom");
           // Blynk.run() ;
@@ -1296,7 +1315,7 @@ void setup() {
           EEPROM.begin(1024);
           EEPROM.put(0, aggKp);
           EEPROM.put(10, aggTn);
-          EEPROM.put(20, aggTv);  
+          EEPROM.put(20, aggTv);
           EEPROM.put(30, setPoint);
           EEPROM.put(40, brewtime);
           EEPROM.put(50, preinfusion);
@@ -1309,7 +1328,7 @@ void setup() {
           // eeprom schließen
           EEPROM.commit();
         }
-      } else 
+      } else
       {
         DEBUG_println("No connection to Blynk");
         EEPROM.begin(1024);  // open eeprom
@@ -1317,11 +1336,11 @@ void setup() {
         EEPROM.get(0, dummy);
         DEBUG_print("check eeprom 0x00 in dummy: ");
         DEBUG_println(dummy);
-        if (!isnan(dummy)) 
+        if (!isnan(dummy))
         {
-          #if DISPLAY != 0
-           displayLogo("3: Blynk not connected", "use eeprom values..");
-          #endif 
+#if DISPLAY != 0
+          displayLogo("3: Blynk not connected", "use eeprom values..");
+#endif
           EEPROM.get(0, aggKp);
           EEPROM.get(10, aggTn);
           EEPROM.get(20, aggTv);
@@ -1334,14 +1353,14 @@ void setup() {
           EEPROM.get(110, aggbTv);
           EEPROM.get(120, brewtimersoftware);
           EEPROM.get(130, brewboarder);
-        } 
+        }
       }
     }
-    else 
-    { 
-      #if DISPLAY != 0
-        displayLogo("No ", "WIFI");
-      #endif
+    else
+    {
+#if DISPLAY != 0
+      displayLogo("No ", "WIFI");
+#endif
       DEBUG_println("No WIFI");
       WiFi.disconnect(true);
       delay(1000);
@@ -1405,10 +1424,10 @@ void setup() {
   windowStartTime = currentTime;
   previousMillisDisplay = currentTime;
   previousMillisBlynk = currentTime;
-  previousMillisETrigger = currentTime; 
-  #if ENABLESCALE == 1
+  previousMillisETrigger = currentTime;
+#if ENABLESCALE == 1
   previousMillisScale = currentTime;
-  #endif
+#endif
 
   /********************************************************
     Timer1 ISR - Initialisierung
@@ -1429,7 +1448,7 @@ void setup() {
 
 void loop() {
   //Only do Wifi stuff, if Wifi is connected
-  if (WiFi.status() == WL_CONNECTED && Offlinemodus == 0) { 
+  if (WiFi.status() == WL_CONNECTED && Offlinemodus == 0) {
 
     //MQTT
     if (MQTT == 1) {
@@ -1470,16 +1489,16 @@ void loop() {
   refreshTemp();   //read new temperature values
   testEmergencyStop();  // test if Temp is to high
   brew();   //start brewing if button pressed
-  #if ENABLESCALE == 1
+#if ENABLESCALE == 1
   checkWeight();
-  #endif
+#endif
 
   sendToBlynk();
-   if(ETRIGGER == 1) // E-Trigger active then void Etrigger() 
+  if (ETRIGGER == 1) // E-Trigger active then void Etrigger()
   {
     ETriggervoid();
   }
-  
+
 
   //check if PID should run or not. If not, set to manuel and force output to zero
   if (pidON == 0 && pidMode == 1) {
@@ -1494,14 +1513,14 @@ void loop() {
   //Sicherheitsabfrage
   if (!sensorError && Input > 0 && !emergencyStop && backflushState == 10 && (backflushON == 0 || brewcounter > 10)) {
     brewdetection();  //if brew detected, set PID values
-      #if DISPLAY != 0
-          displayShottimer() ;
-          #if DISPLAYTEMPLATE < 20 // not in vertikal template
-            heatinglogo(); 
-          #endif
-           OFFlogo(); 
-          printScreen();  // refresh display
-      #endif
+#if DISPLAY != 0
+    displayShottimer() ;
+#if DISPLAYTEMPLATE < 20 // not in vertikal template
+    heatinglogo();
+#endif
+    OFFlogo();
+    printScreen();  // refresh display
+#endif
     //Set PID if first start of machine detected
     if (Input < setPoint && kaltstart) {
       if (startTn != 0) {
@@ -1536,23 +1555,23 @@ void loop() {
       }
     }
 
-  } else if (sensorError) 
+  } else if (sensorError)
   {
     //Deactivate PID
-    if (pidMode == 1) 
+    if (pidMode == 1)
     {
       pidMode = 0;
       bPID.SetMode(pidMode);
       Output = 0 ;
     }
     digitalWrite(pinRelayHeater, LOW); //Stop heating
-      #if DISPLAY != 0
-        displayMessage("Error, Temp: ", String(Input), "Check Temp. Sensor!", "", "", ""); //DISPLAY AUSGABE
-      #endif 
-  } else if (emergencyStop) 
+#if DISPLAY != 0
+    displayMessage("Error, Temp: ", String(Input), "Check Temp. Sensor!", "", "", ""); //DISPLAY AUSGABE
+#endif
+  } else if (emergencyStop)
   {
     //Deactivate PID
-    if (pidMode == 1) 
+    if (pidMode == 1)
     {
       pidMode = 0;
       bPID.SetMode(pidMode);
@@ -1560,23 +1579,23 @@ void loop() {
     }
 
     digitalWrite(pinRelayHeater, LOW); //Stop heating
-    #if DISPLAY != 0
-      displayEmergencyStop();
-    #endif 
-  } 
+#if DISPLAY != 0
+    displayEmergencyStop();
+#endif
+  }
   else if (backflushON || backflushState > 10) {
     if (backflushState == 43) {
-      #if DISPLAY != 0
-        displayMessage("Backflush finished", "Please reset brewswitch...", "", "", "", "");
-      #endif 
+#if DISPLAY != 0
+      displayMessage("Backflush finished", "Please reset brewswitch...", "", "", "", "");
+#endif
     } else if (backflushState == 10) {
-      #if DISPLAY != 0
-        displayMessage("Backflush activated", "Please set brewswitch...", "", "", "", "");
-      #endif
+#if DISPLAY != 0
+      displayMessage("Backflush activated", "Please set brewswitch...", "", "", "", "");
+#endif
     } else if ( backflushState > 10) {
-      #if DISPLAY != 0
-        displayMessage("Backflush running:", String(flushCycles), "from", String(maxflushCycles), "", "");
-      #endif
+#if DISPLAY != 0
+      displayMessage("Backflush running:", String(flushCycles), "from", String(maxflushCycles), "", "");
+#endif
     }
   }
 
