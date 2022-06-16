@@ -5,6 +5,23 @@
             <div class="card card-accent-dark mb-5 shadow-sm rounded">
                 <div class="card-body bg-light pb-1 rounded">
                     <h5 class="card-title">
+                        Gauges
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="row d-flex justify-content-center">
+                        <div class="gauge-element">
+                            <canvas id="temperature_gauge"  width="300" height="300" ></canvas>
+                        </div>    
+                        <div class="gauge-element">
+                            <canvas id="pressure_gauge" width="340" height="300" ></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card card-accent-dark mb-5 shadow-sm rounded">
+                <div class="card-body bg-light pb-1 rounded">
+                    <h5 class="card-title">
                         Temperature
                     </h5>
                 </div>
@@ -12,6 +29,7 @@
                     <div id="chart-temperature"></div>
                 </div>
             </div>
+            <script src="/js/gauge.min.js"></script>
             <div class="card card-accent-dark mb-5 shadow-sm rounded">
                 <div class="card-body bg-light pb-1 rounded">
                     <h5 class="card-title">
@@ -84,6 +102,11 @@
                                 <tr>
                                     <td><b>Temperature</b></td>
                                     <td><span id="varTEMP">%VAR_SHOW_TEMP%</span>° C</td>
+                                    <td></td>
+                                </tr>
+                                <tr>
+                                    <td><b>Pressure</b></td>
+                                    <td><span id="varPRESS">%VAR_SHOW_PRESS%</span> bar</td>
                                     <td></td>
                                 </tr>
                                 <tr>

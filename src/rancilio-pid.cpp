@@ -2097,7 +2097,7 @@ void looppid() {
     bPID.Compute();
 
     if ((millis() - lastTempEvent) > tempEventInterval) {
-        sendTempEvent(Input, BrewSetPoint, Output);
+        sendTempEvent(Input, BrewSetPoint, Output, inputPressure);
         lastTempEvent = millis();
     }
 

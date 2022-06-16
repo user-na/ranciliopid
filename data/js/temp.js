@@ -7,6 +7,92 @@ var targetTempVals = [];
 var heaterPowerVals = [];
 var dates = [];
 
+// Draw temperature gauge
+var gauge_t = new RadialGauge(
+  {
+      renderTo: document.getElementById('temperature_gauge'),
+      width: 300,
+      height: 300,
+      units: '°C',
+      title: 'Temperature',
+      value: 20,
+      minValue: 20,
+      maxValue: 160,
+      majorTicks: [
+      '20','40','60','80','100','120','140','160'
+      ],
+      minorTicks: 4,
+      strokeTicks: true,
+      highlights: [
+      { from:  20, to:  85, color: "rgba(  0, 137, 199, 1)" },
+      { from: 85, to: 95, color: "rgba(  0,  150,  25, 1)" },
+      { from: 120, to: 140, color: "rgba(0, 150,   25, 1)" },
+      { from: 145, to: 150, color: "rgba(255, 230,   0, 1)" },
+      { from: 150, to: 160, color: "rgba(189,  32,  27, 1)" }
+      ],
+      colorPlate: 'transparent',
+      colorMajorTicks: '#222',
+      colorMinorTicks: '#555',
+      colorTitle: '#000',
+      colorUnits: '#000',
+      colorNumbers: '#222',
+      colorNeedle: 'rgba(240, 128, 128, 1)',
+      colorNeedleEnd: 'rgba(255, 160, 122, .9)',
+      valueBox: true,
+      valueBoxStroke: 0,
+      valueInt: 2,
+      valueDec: 1,
+      colorValueBoxRect: 'rgba(0, 0, 0, 0)',
+      colorValueBoxBackground: 'rgba(0, 0, 0, 0)',
+      animatedValue: true,
+      animationRule: 'linear',
+      animationDuration: 1500
+  }
+  );
+  gauge_t.draw();
+
+  // Draw pressure gauge
+  var gauge_p = new RadialGauge({
+      renderTo: document.getElementById('pressure_gauge'),
+      width: 300,
+      height: 300,
+      units: 'bar',
+      title: 'Pressure',
+      value: 0,
+      minValue: 0,
+      maxValue: 16,
+      majorTicks: [
+      '0','2','4','6','8','10','12','14','16'
+      ],
+      minorTicks: 4,
+      strokeTicks: true,
+      highlights: [
+      { from:  0, to:  8, color: "rgba(  0, 137, 199, 1)" },
+      { from:  8, to: 10, color: "rgba(  0,  150,  25, 1)" },
+      { from: 12, to: 16, color: "rgba(189,  32,  27, 1)" }     
+      ],
+      colorPlate: 'transparent',
+      colorMajorTicks: '#222',
+      colorMinorTicks: '#555',
+      colorTitle: '#000',
+      colorUnits: '#000',
+      colorNumbers: '#222',
+      colorNeedle: 'rgba(240, 128, 128, 1)',
+      colorNeedleEnd: 'rgba(255, 160, 122, .9)',
+      valueBox: true,
+      valueBoxStroke: 0,
+      valueInt: 1,
+      valueDec: 1,
+      colorValueBoxRect: 'rgba(0, 0, 0, 0)',
+      colorValueBoxBackground: 'rgba(0, 0, 0, 0)',
+      animatedValue: true,
+      animationRule: 'elastic',
+      animationDuration: 250
+  }
+  );
+  gauge_p.draw();
+
+
 var chartDiv = 'chart-temperature';
 var heaterDiv = 'chart-heater';
 
@@ -202,7 +288,6 @@ function getTemperatures() {
   xhr.send();
 }
 
-
 if (!!window.EventSource) {
   var source = new EventSource('/events');
 
@@ -240,6 +325,10 @@ if (!!window.EventSource) {
       plotData(myObj);
 
       document.getElementById("varTEMP").innerText = myObj["currentTemp"].toFixed(1);
+      gauge_t.value = myObj["currentTemp"].toFixed(1);
+
+      document.getElementById("varPRESS").innerText = myObj["currentPress"].toFixed(1);
+      gauge_p.value = myObj["currentPress"].toFixed(1);
     },
     false
   );
