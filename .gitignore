@@ -1,5 +1,5 @@
 # ignore actual user config
-rancilio-pid/rancilio-pid/userConfig.h
+src/userConfig.h
 
 # ignore PlatformIO build folder
 .pio/*
@@ -10,4 +10,5 @@ rancilio-pid/rancilio-pid/userConfig.h
 # ignore macOS Finder configuration storage files
 **/.DS_Store
 
-platformio.ini
+platformio_extra.ini
+**/rancilio-pid.ino.cpp
